@@ -1,0 +1,13 @@
+THEORY:::
+uv is a Python package/project manager made by Astral. It's commonly used in RAG/AI projects to create virtual environments, install dependencies, and run Python applications. It's similar to using pip + venv, but much faster.
+
+Installation:
+    winget install --id=astral-sh.uv -e
+    restart
+
+
+CMD:::
+uv init
+uv venv
+venv\Scripts\activate
+uv add -r requirement.txt

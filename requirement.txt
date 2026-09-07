@@ -1,0 +1,31 @@
+## uv add -r requirement.txt
+## langchain                 → Core LangChain
+## langchain-community       → Community integrations/loaders
+## langchain-text-splitters  → RecursiveCharacterTextSplitter
+## langchain-huggingface     → Hugging Face embeddings
+## langchain-chroma          → Chroma integration
+## sentence-transformers     → Local embedding models
+## chromadb                  → Vector database
+## faiss-cpu                 → FAISS vector search
+## pypdf                     → Reading PDF files
+
+
+langchain
+langchain-core
+langchain-community
+pymupdf
+langchain-text-splitters
+langchain-huggingface
+langchain-chroma
+pypdf
+pymupdf
+ipykernel
+sentence-transformers
+chromadb
+faiss-cpu   
+langchain-groq
+python-dotenv
+typesense
+langchain_openai
+langgraph
+streamlit
