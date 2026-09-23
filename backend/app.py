@@ -45,6 +45,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_OAUTH_ENABLED = GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
 if GOOGLE_OAUTH_ENABLED:
     oauth = OAuth()
@@ -55,7 +56,8 @@ if GOOGLE_OAUTH_ENABLED:
         server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
         client_kwargs={
             'scope': 'openid email profile'
-        }
+        },
+        redirect_uri='http://localhost:8001/auth/google/callback'
     )
 
 # CORS middleware for React frontend
@@ -579,11 +581,28 @@ async def google_callback(request: Request):
     
     try:
         token = await oauth.google.authorize_access_token(request)
-        user_info = await oauth.google.parse_id_token(request, token)
+        
+        # Get user info from the token directly
+        user_info = token.get('userinfo')
+        if not user_info:
+            # Fallback to id_token if userinfo is not available
+            id_token = token.get('id_token')
+            if id_token:
+                # Parse id_token to get user info
+                import jwt
+                try:
+                    # Decode the JWT token (without verification for simplicity in this case)
+                    decoded = jwt.decode(id_token, options={"verify_signature": False})
+                    user_info = decoded
+                except:
+                    pass
+        
+        if not user_info:
+            raise HTTPException(status_code=400, detail="Could not get user information from Google")
         
         # Extract user information
         email = user_info.get('email')
-        name = user_info.get('name', email.split('@')[0])
+        name = user_info.get('name', email.split('@')[0]) if email else 'User'
         
         if not email:
             raise HTTPException(status_code=400, detail="Could not get email from Google")
@@ -609,11 +628,10 @@ async def google_callback(request: Request):
             # Redirect to frontend with token in URL
             from fastapi.responses import RedirectResponse
             import urllib.parse
-            frontend_url = "http://localhost:3000"
             user_json = json.dumps(user_obj.model_dump())
             encoded_user = urllib.parse.quote(user_json)
             return RedirectResponse(
-                url=f"{frontend_url}/oauth-callback?token={access_token}&user={encoded_user}"
+                url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
             )
         else:
             # Create new user as normal user (auto-verified)
@@ -642,14 +660,15 @@ async def google_callback(request: Request):
             # Redirect to frontend with token in URL
             from fastapi.responses import RedirectResponse
             import urllib.parse
-            frontend_url = "http://localhost:3000"
             user_json = json.dumps(user_obj.model_dump())
             encoded_user = urllib.parse.quote(user_json)
             return RedirectResponse(
-                url=f"{frontend_url}/oauth-callback?token={access_token}&user={encoded_user}"
+                url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
             )
             
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -76,14 +76,45 @@ Create a `.env` file with:
 ```bash
 GROQ_API_KEY=your_groq_api_key_here
 COHERE_API_KEY=your_cohere_api_key_here  # Optional
+GOOGLE_CLIENT_ID=your_google_client_id_here  # Optional - for Google OAuth
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here  # Optional - for Google OAuth
 ```
+
+**Google OAuth Setup (Optional):**
+To enable Google OAuth login:
+1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. Create a new project or select existing one
+3. Enable Google+ API
+4. Go to Credentials → Create Credentials → OAuth client ID
+5. Application type: Web application
+6. Authorized redirect URIs: `http://localhost:8001/auth/google/callback`
+7. Copy Client ID and Client Secret to your `.env` file
+8. Restart the backend server to enable Google login
 
 4. Place PDF documents in the `./data` directory
 
 5. Run the application:
+
+**Option 1: Streamlit App (Backend + Frontend combined)**
 ```bash
 streamlit run evidenceflow_app.py
 ```
+
+**Option 2: React Frontend + FastAPI Backend**
+```bash
+# Terminal 1: Start the backend
+cd backend
+python -m uvicorn app:app --host 0.0.0.0 --port 8001
+
+# Terminal 2: Start the frontend
+cd frontend
+npm install
+npm start
+```
+
+**Default Login Credentials:**
+- Admin: `admin@evidenceflow.ai` / `admin123`
+- The admin user is auto-created on first startup
 
 ## 📖 Usage
 
