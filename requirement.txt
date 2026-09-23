@@ -8,6 +8,12 @@
 ## chromadb                  → Vector database
 ## faiss-cpu                 → FAISS vector search
 ## pypdf                     → Reading PDF files
+## rank-bm25                 → BM25 algorithm
+## cohere                    → Reranking API
+## plotly                    → Visualizations
+## pandas                    → Data analysis
+## fastapi                   → Modern web framework
+## uvicorn                   → ASGI server
 
 
 langchain
@@ -29,3 +35,11 @@ typesense
 langchain_openai
 langgraph
 streamlit
+rank-bm25
+cohere
+plotly
+pandas
+numpy
+fastapi
+uvicorn
+pydantic

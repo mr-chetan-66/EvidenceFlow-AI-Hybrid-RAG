@@ -15,6 +15,17 @@ class EmbeddingManager:
         
     def _load_model(self):
         try:
+            # Load model with optimized settings
+            self.model=SentenceTransformer(
+                self.model_name,
+                device='cpu'  # Force CPU for consistency
+            )
+        except Exception as e:
+            print(f"Error Model loading {self.model_name} : {e}")
+            raise
+        
+    def _load_model(self):
+        try:
             self.model=SentenceTransformer(self.model_name)
         except Exception as e:
             print(f"Error Model loading {self.model_name} : {e}")
@@ -24,7 +35,13 @@ class EmbeddingManager:
         if not self.model:
             raise ValueError("Model Not Loaded")
         
-        embedding=self.model.encode(text,show_progress_bar=False)
+        # Optimized embedding generation with batching and progress
+        embedding=self.model.encode(
+            text,
+            show_progress_bar=True,
+            batch_size=32,  # Process in batches for speed
+            normalize_embeddings=True  # Normalize for better similarity
+        )
         return embedding
 
     

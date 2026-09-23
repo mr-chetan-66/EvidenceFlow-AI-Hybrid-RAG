@@ -12,3 +12,14 @@ venv/
 data/vector_store/
 chroma/
 *.sqlite3
+
+# Application databases
+users.db
+token_store.json
+
+# Cache and temporary files
+data/cag_cache/
+
+# Node modules
+frontend/node_modules/
+frontend/.vite/

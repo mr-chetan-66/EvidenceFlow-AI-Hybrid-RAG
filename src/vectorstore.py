@@ -67,4 +67,8 @@ class VectorStore:
         
     def similar_search(self,query_embedding:np.ndarray,n_results=5):
         result=self.collection.query(query_embeddings=[query_embedding.tolist()],n_results=n_results)
+        # Ensure distances are included in the result
+        if 'distances' not in result and 'documents' in result:
+            # If distances not returned, create dummy distances
+            result['distances'] = [[1.0] * len(result['documents'][0])]
         return result

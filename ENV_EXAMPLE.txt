@@ -1,0 +1,21 @@
+# EvidenceFlow AI Environment Variables
+
+# Groq API (Required for RAG functionality)
+GROQ_API_KEY=your_groq_api_key_here
+
+# Cohere API (Optional, for reranking)
+COHERE_API_KEY=your_cohere_api_key_here
+
+# Google OAuth (Optional, for Google login)
+# Get these from: https://console.cloud.google.com/apis/credentials
+GOOGLE_CLIENT_ID=your_google_client_id_here
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here
+
+# Instructions for Google OAuth Setup:
+# 1. Go to Google Cloud Console (console.cloud.google.com)
+# 2. Create a new project or select existing one
+# 3. Enable Google+ API
+# 4. Go to Credentials → Create Credentials → OAuth client ID
+# 5. Application type: Web application
+# 6. Authorized redirect URIs: http://localhost:8001/auth/google/callback
+# 7. Copy Client ID and Client Secret to this file
