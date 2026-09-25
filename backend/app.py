@@ -19,6 +19,8 @@ import hashlib
 from authlib.integrations.starlette_client import OAuth
 from starlette.requests import Request
 from dotenv import load_dotenv
+import sqlalchemy
+from sqlalchemy.orm import sessionmaker
 
 # Load environment variables
 load_dotenv()
@@ -80,56 +82,116 @@ agentic_retrieval = None
 cache = None
 system_ready = False
 
-# Database setup
+# PostgreSQL support
+postgres_engine = None
+User_model = None
+
+# Database setup - supports both SQLite (local) and PostgreSQL (Render)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 def init_db():
-    """Initialize SQLite database for users"""
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    
-    # Create users table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            is_verified BOOLEAN DEFAULT 0,
-            verification_token TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Add is_verified column if it doesn't exist (migration for existing databases)
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if 'is_verified' not in columns:
-        cursor.execute('ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT 0')
-        print("Added is_verified column to existing users table")
-    
-    # Create default admin user if not exists
-    cursor.execute('SELECT * FROM users WHERE role = "admin"')
-    if not cursor.fetchone():
-        # Create default admin: admin@evidenceflow.ai / admin123 (auto-verified)
-        admin_password = hashlib.sha256("admin123".encode()).hexdigest()
-        cursor.execute(
-            'INSERT INTO users (email, name, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?)',
-            ('admin@evidenceflow.ai', 'Admin User', admin_password, 'admin', 1)
-        )
-        print("Default admin user created: admin@evidenceflow.ai / admin123")
+    """Initialize database for users - supports SQLite and PostgreSQL"""
+    if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+        # PostgreSQL for production
+        import sqlalchemy
+        from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, text
+        from sqlalchemy.ext.declarative import declarative_base
+        from sqlalchemy.orm import sessionmaker
+        
+        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        Base = declarative_base()
+        
+        class User(Base):
+            __tablename__ = "users"
+            id = Column(Integer, primary_key=True, index=True)
+            email = Column(String, unique=True, index=True, nullable=False)
+            name = Column(String, nullable=False)
+            password_hash = Column(String, nullable=False)
+            role = Column(String, default="user", nullable=False)
+            is_verified = Column(Boolean, default=False)
+            verification_token = Column(String, nullable=True)
+            created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+        
+        Base.metadata.create_all(bind=engine)
+        
+        # Create default admin user
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        try:
+            admin = session.query(User).filter(User.role == "admin").first()
+            if not admin:
+                admin_password = hashlib.sha256("admin123".encode()).hexdigest()
+                admin_user = User(
+                    email="admin@evidenceflow.ai",
+                    name="Admin User",
+                    password_hash=admin_password,
+                    role="admin",
+                    is_verified=True
+                )
+                session.add(admin_user)
+                session.commit()
+                print("Default admin user created: admin@evidenceflow.ai / admin123")
+            else:
+                admin.is_verified = True
+                session.commit()
+                print("Ensured admin user is verified")
+        finally:
+            session.close()
+            
+        # Store engine globally for later use
+        global postgres_engine
+        postgres_engine = engine
+        global User_model
+        User_model = User
+        
     else:
-        # Ensure existing admin is verified
-        cursor.execute('UPDATE users SET is_verified = 1 WHERE role = "admin"')
-        print("Ensured admin user is verified")
-    
-    conn.commit()
-    conn.close()
+        # SQLite for local development
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                is_verified BOOLEAN DEFAULT 0,
+                verification_token TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if 'is_verified' not in columns:
+            cursor.execute('ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT 0')
+            print("Added is_verified column to existing users table")
+        
+        cursor.execute('SELECT * FROM users WHERE role = "admin"')
+        if not cursor.fetchone():
+            admin_password = hashlib.sha256("admin123".encode()).hexdigest()
+            cursor.execute(
+                'INSERT INTO users (email, name, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?)',
+                ('admin@evidenceflow.ai', 'Admin User', admin_password, 'admin', 1)
+            )
+            print("Default admin user created: admin@evidenceflow.ai / admin123")
+        else:
+            cursor.execute('UPDATE users SET is_verified = 1 WHERE role = "admin"')
+            print("Ensured admin user is verified")
+        
+        conn.commit()
+        conn.close()
 
 def get_db_connection():
-    """Get database connection"""
-    conn = sqlite3.connect('users.db')
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Get database connection - supports both SQLite and PostgreSQL"""
+    if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+        Session = sessionmaker(bind=postgres_engine)
+        return Session()
+    else:
+        conn = sqlite3.connect('users.db')
+        conn.row_factory = sqlite3.Row
+        return conn
 
 # Simple token storage with persistence (in production, use Redis or proper JWT)
 token_store = {}
@@ -477,66 +539,122 @@ async def register(user_data: UserCreate):
     """Register a new user"""
     conn = get_db_connection()
     
-    # Check if user already exists
-    existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (user_data.email,)).fetchone()
-    if existing_user:
+    try:
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            # PostgreSQL query
+            from sqlalchemy import text
+            existing_user = conn.execute(text("SELECT * FROM users WHERE email = :email"), {"email": user_data.email}).fetchone()
+            if existing_user:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Email already registered")
+            
+            password_hash = hashlib.sha256(user_data.password.encode()).hexdigest()
+            
+            new_user = User_model(
+                email=user_data.email,
+                name=user_data.name,
+                password_hash=password_hash,
+                role=user_data.role,
+                is_verified=True
+            )
+            conn.add(new_user)
+            conn.commit()
+            
+            user = conn.execute(text("SELECT * FROM users WHERE email = :email"), {"email": user_data.email}).fetchone()
+            conn.close()
+            
+            return User(id=user.id, email=user.email, name=user.name, role=user.role, is_verified=True, created_at=str(user.created_at))
+        else:
+            # SQLite query
+            existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (user_data.email,)).fetchone()
+            if existing_user:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Email already registered")
+            
+            password_hash = hashlib.sha256(user_data.password.encode()).hexdigest()
+            
+            cursor = conn.execute(
+                'INSERT INTO users (email, name, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?)',
+                (user_data.email, user_data.name, password_hash, user_data.role, 1)
+            )
+            conn.commit()
+            
+            user = conn.execute('SELECT * FROM users WHERE id = ?', (cursor.lastrowid,)).fetchone()
+            conn.close()
+            
+            user_dict = dict(user)
+            return User(id=user_dict['id'], email=user_dict['email'], name=user_dict['name'], role=user_dict['role'], is_verified=True, created_at=user_dict['created_at'])
+    except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Hash password
-    password_hash = hashlib.sha256(user_data.password.encode()).hexdigest()
-    
-    # Insert new user
-    cursor = conn.execute(
-        'INSERT INTO users (email, name, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?)',
-        (user_data.email, user_data.name, password_hash, user_data.role, 1)  # Auto-verify new users
-    )
-    conn.commit()
-    
-    # Get created user
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (cursor.lastrowid,)).fetchone()
-    conn.close()
-    
-    # Convert sqlite3.Row to dict
-    user_dict = dict(user)
-    return User(id=user_dict['id'], email=user_dict['email'], name=user_dict['name'], role=user_dict['role'], is_verified=True, created_at=user_dict['created_at'])
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/login", response_model=Token)
 async def login(login_data: UserLogin):
     """Login user and return token"""
     conn = get_db_connection()
     
-    # Get user
-    user = conn.execute('SELECT * FROM users WHERE email = ?', (login_data.email,)).fetchone()
-    conn.close()
-    
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    # Verify password
-    password_hash = hashlib.sha256(login_data.password.encode()).hexdigest()
-    if user['password_hash'] != password_hash:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    # Check verification for admin users (except default admin)
-    # Convert sqlite3.Row to dict to handle missing columns safely
-    user_dict = dict(user)
-    is_verified = user_dict.get('is_verified', True)  # Default to True for backward compatibility
-    if user_dict['role'] == 'admin' and user_dict['email'] != 'admin@evidenceflow.ai' and not is_verified:
-        raise HTTPException(status_code=403, detail="Admin account requires email verification")
-    
-    # Create token
-    user_obj = User(
-        id=user_dict['id'], 
-        email=user_dict['email'], 
-        name=user_dict['name'], 
-        role=user_dict['role'], 
-        is_verified=is_verified,
-        created_at=user_dict['created_at']
-    )
-    token = create_access_token(user_obj)
-    
-    return Token(access_token=token, token_type="bearer", user=user_obj)
+    try:
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            # PostgreSQL query
+            from sqlalchemy import text
+            user = conn.execute(text("SELECT * FROM users WHERE email = :email"), {"email": login_data.email}).fetchone()
+            conn.close()
+            
+            if not user:
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+            password_hash = hashlib.sha256(login_data.password.encode()).hexdigest()
+            if user.password_hash != password_hash:
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+            is_verified = user.is_verified if hasattr(user, 'is_verified') else True
+            if user.role == 'admin' and user.email != 'admin@evidenceflow.ai' and not is_verified:
+                raise HTTPException(status_code=403, detail="Admin account requires email verification")
+            
+            user_obj = User(
+                id=user.id,
+                email=user.email,
+                name=user.name,
+                role=user.role,
+                is_verified=is_verified,
+                created_at=str(user.created_at)
+            )
+            token = create_access_token(user_obj)
+            
+            return Token(access_token=token, token_type="bearer", user=user_obj)
+        else:
+            # SQLite query
+            user = conn.execute('SELECT * FROM users WHERE email = ?', (login_data.email,)).fetchone()
+            conn.close()
+            
+            if not user:
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+            password_hash = hashlib.sha256(login_data.password.encode()).hexdigest()
+            if user['password_hash'] != password_hash:
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+            user_dict = dict(user)
+            is_verified = user_dict.get('is_verified', True)
+            if user_dict['role'] == 'admin' and user_dict['email'] != 'admin@evidenceflow.ai' and not is_verified:
+                raise HTTPException(status_code=403, detail="Admin account requires email verification")
+            
+            user_obj = User(
+                id=user_dict['id'],
+                email=user_dict['email'],
+                name=user_dict['name'],
+                role=user_dict['role'],
+                is_verified=is_verified,
+                created_at=user_dict['created_at']
+            )
+            token = create_access_token(user_obj)
+            
+            return Token(access_token=token, token_type="bearer", user=user_obj)
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/auth/me", response_model=User)
 async def get_me(current_user: User = Depends(get_current_user)):
@@ -609,63 +727,131 @@ async def google_callback(request: Request):
         
         # Check if user exists
         conn = get_db_connection()
-        existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
         
-        if existing_user:
-            # User exists, log them in
-            existing_user_dict = dict(existing_user)
-            user_obj = User(
-                id=existing_user_dict['id'],
-                email=existing_user_dict['email'],
-                name=existing_user_dict['name'],
-                role=existing_user_dict['role'],
-                is_verified=existing_user_dict.get('is_verified', True),
-                created_at=existing_user_dict['created_at']
-            )
+        try:
+            if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+                # PostgreSQL query
+                from sqlalchemy import text
+                existing_user = conn.execute(text("SELECT * FROM users WHERE email = :email"), {"email": email}).fetchone()
+                
+                if existing_user:
+                    # User exists, log them in
+                    user_obj = User(
+                        id=existing_user.id,
+                        email=existing_user.email,
+                        name=existing_user.name,
+                        role=existing_user.role,
+                        is_verified=existing_user.is_verified if hasattr(existing_user, 'is_verified') else True,
+                        created_at=str(existing_user.created_at)
+                    )
+                    conn.close()
+                    access_token = create_access_token(user_obj)
+                    
+                    # Redirect to frontend with token in URL
+                    from fastapi.responses import RedirectResponse
+                    import urllib.parse
+                    user_json = json.dumps(user_obj.model_dump())
+                    encoded_user = urllib.parse.quote(user_json)
+                    return RedirectResponse(
+                        url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
+                    )
+                else:
+                    # Create new user as normal user (auto-verified)
+                    password_hash = hashlib.sha256(secrets.token_urlsafe(32).encode()).hexdigest()
+                    new_user = User_model(
+                        email=email,
+                        name=name,
+                        password_hash=password_hash,
+                        role='user',
+                        is_verified=True
+                    )
+                    conn.add(new_user)
+                    conn.commit()
+                    
+                    created_user = conn.execute(text("SELECT * FROM users WHERE email = :email"), {"email": email}).fetchone()
+                    conn.close()
+                    
+                    user_obj = User(
+                        id=created_user.id,
+                        email=created_user.email,
+                        name=created_user.name,
+                        role=created_user.role,
+                        is_verified=True,
+                        created_at=str(created_user.created_at)
+                    )
+                    access_token = create_access_token(user_obj)
+                    
+                    # Redirect to frontend with token in URL
+                    from fastapi.responses import RedirectResponse
+                    import urllib.parse
+                    user_json = json.dumps(user_obj.model_dump())
+                    encoded_user = urllib.parse.quote(user_json)
+                    return RedirectResponse(
+                        url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
+                    )
+            else:
+                # SQLite query
+                existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+                
+                if existing_user:
+                    # User exists, log them in
+                    existing_user_dict = dict(existing_user)
+                    user_obj = User(
+                        id=existing_user_dict['id'],
+                        email=existing_user_dict['email'],
+                        name=existing_user_dict['name'],
+                        role=existing_user_dict['role'],
+                        is_verified=existing_user_dict.get('is_verified', True),
+                        created_at=existing_user_dict['created_at']
+                    )
+                    conn.close()
+                    access_token = create_access_token(user_obj)
+                    
+                    # Redirect to frontend with token in URL
+                    from fastapi.responses import RedirectResponse
+                    import urllib.parse
+                    user_json = json.dumps(user_obj.model_dump())
+                    encoded_user = urllib.parse.quote(user_json)
+                    return RedirectResponse(
+                        url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
+                    )
+                else:
+                    # Create new user as normal user (auto-verified)
+                    password_hash = hashlib.sha256(secrets.token_urlsafe(32).encode()).hexdigest()
+                    cursor = conn.execute(
+                        'INSERT INTO users (email, name, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?)',
+                        (email, name, password_hash, 'user', 1)
+                    )
+                    conn.commit()
+                    
+                    # Get created user
+                    new_user = conn.execute('SELECT * FROM users WHERE id = ?', (cursor.lastrowid,)).fetchone()
+                    conn.close()
+                    
+                    new_user_dict = dict(new_user)
+                    user_obj = User(
+                        id=new_user_dict['id'],
+                        email=new_user_dict['email'],
+                        name=new_user_dict['name'],
+                        role=new_user_dict['role'],
+                        is_verified=new_user_dict.get('is_verified', True),
+                        created_at=new_user_dict['created_at']
+                    )
+                    access_token = create_access_token(user_obj)
+                    
+                    # Redirect to frontend with token in URL
+                    from fastapi.responses import RedirectResponse
+                    import urllib.parse
+                    user_json = json.dumps(user_obj.model_dump())
+                    encoded_user = urllib.parse.quote(user_json)
+                    return RedirectResponse(
+                        url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
+                    )
+        except Exception as e:
             conn.close()
-            access_token = create_access_token(user_obj)
-            
-            # Redirect to frontend with token in URL
-            from fastapi.responses import RedirectResponse
-            import urllib.parse
-            user_json = json.dumps(user_obj.model_dump())
-            encoded_user = urllib.parse.quote(user_json)
-            return RedirectResponse(
-                url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
-            )
-        else:
-            # Create new user as normal user (auto-verified)
-            password_hash = hashlib.sha256(secrets.token_urlsafe(32).encode()).hexdigest()
-            cursor = conn.execute(
-                'INSERT INTO users (email, name, password_hash, role, is_verified) VALUES (?, ?, ?, ?, ?)',
-                (email, name, password_hash, 'user', 1)
-            )
-            conn.commit()
-            
-            # Get created user
-            new_user = conn.execute('SELECT * FROM users WHERE id = ?', (cursor.lastrowid,)).fetchone()
-            conn.close()
-            
-            new_user_dict = dict(new_user)
-            user_obj = User(
-                id=new_user_dict['id'],
-                email=new_user_dict['email'],
-                name=new_user_dict['name'],
-                role=new_user_dict['role'],
-                is_verified=new_user_dict.get('is_verified', True),
-                created_at=new_user_dict['created_at']
-            )
-            access_token = create_access_token(user_obj)
-            
-            # Redirect to frontend with token in URL
-            from fastapi.responses import RedirectResponse
-            import urllib.parse
-            user_json = json.dumps(user_obj.model_dump())
-            encoded_user = urllib.parse.quote(user_json)
-            return RedirectResponse(
-                url=f"{FRONTEND_URL}/oauth-callback?token={access_token}&user={encoded_user}"
-            )
-            
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         import traceback
         traceback.print_exc()

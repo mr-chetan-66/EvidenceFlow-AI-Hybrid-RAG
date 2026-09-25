@@ -1,0 +1,17 @@
+# Database Configuration (Render provides this automatically)
+DATABASE_URL=postgresql://user:password@host:port/database
+
+# API Keys (Required)
+GROQ_API_KEY=your_groq_api_key_here
+COHERE_API_KEY=your_cohere_api_key_here
+
+# Google OAuth (Optional)
+GOOGLE_CLIENT_ID=your_google_client_id_here
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here
+
+# Frontend URL (for CORS)
+FRONTEND_URL=https://evidenceflow-frontend.onrender.com
+
+# Server Configuration
+PORT=8001
+PYTHON_VERSION=3.11

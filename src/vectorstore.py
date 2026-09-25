@@ -10,7 +10,12 @@ class VectorStore:
         self.collection_name=collection_name
         if persist_directory is None:
             project_root = Path(__file__).resolve().parents[1]
-            persist_directory = str(project_root / "data" / "vector_store")
+            # Check if running on Render (has mounted disk)
+            render_disk_path = os.getenv("RENDER_DISK_PATH", "/opt/render/project/data")
+            if os.path.exists(render_disk_path):
+                persist_directory = str(Path(render_disk_path) / "vector_store")
+            else:
+                persist_directory = str(project_root / "data" / "vector_store")
         self.persist_directory=persist_directory
         
         os.makedirs(self.persist_directory,exist_ok=True)

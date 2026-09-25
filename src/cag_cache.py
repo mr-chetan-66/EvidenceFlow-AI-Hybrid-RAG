@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 from src.embedding import EmbeddingManager
+import os
 
 
 class CAGCache:
@@ -22,7 +23,12 @@ class CAGCache:
         """
         if cache_dir is None:
             project_root = Path(__file__).resolve().parents[1]
-            cache_dir = str(project_root / "data" / "cag_cache")
+            # Check if running on Render (has mounted disk)
+            render_disk_path = os.getenv("RENDER_DISK_PATH", "/opt/render/project/data")
+            if os.path.exists(render_disk_path):
+                cache_dir = str(Path(render_disk_path) / "cag_cache")
+            else:
+                cache_dir = str(project_root / "data" / "cag_cache")
         
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
