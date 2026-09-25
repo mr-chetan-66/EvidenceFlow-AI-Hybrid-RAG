@@ -2,6 +2,7 @@
 FastAPI Backend for EvidenceFlow AI
 Production-ready REST API for the RAG system with Authentication
 """
+import asyncio
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -328,30 +329,49 @@ class SystemStatus(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize system on startup"""
+    """Fast startup — bind the port immediately, load heavy stuff in the background"""
+    global system_ready
+
+    print("Starting EvidenceFlow AI backend...")
+
+    # Load existing tokens for persistence
+    load_token_store()
+
+    # Clean up old tokens
+    cleanup_old_tokens()
+
+    # Initialize database
+    init_db()
+
+    system_ready = False
+
+    # Don't block startup on model/vectorstore loading (this is what was
+    # stalling Uvicorn long enough for Render's port scan to time out).
+    # Kick it off in the background instead so the port opens right away.
+    asyncio.create_task(initialize_rag_system())
+
+
+async def initialize_rag_system():
+    """Loads the embedding model + vector store without blocking Uvicorn's startup"""
     global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
-    
+
     try:
-        print("Starting EvidenceFlow AI backend...")
-        
-        # Load existing tokens for persistence
-        load_token_store()
-        
-        # Clean up old tokens
-        cleanup_old_tokens()
-        
-        # Initialize database
-        init_db()
-        
-        # Initialize embedding manager
-        embedding_manager = EmbeddingManager()
-        vectorstore = VectorStore()
-        
+        loop = asyncio.get_event_loop()
+
+        def _load():
+            em = EmbeddingManager()
+            vs = VectorStore()
+            return em, vs
+
+        # Run the actual heavy/blocking initialization in a thread so it
+        # doesn't freeze the event loop
+        embedding_manager, vectorstore = await loop.run_in_executor(None, _load)
+
         # Check if we have existing data - if yes, load without reinitializing
         if vectorstore.collection.count() > 0:
             print("Loading from existing vector store (skipping reinitialization)...")
             hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-            
+
             # Try to rebuild BM25 index from existing data
             try:
                 existing_data = vectorstore.collection.get(limit=100)
@@ -360,7 +380,7 @@ async def startup_event():
                     hybrid_retriever.index_documents(texts)
             except:
                 pass
-            
+
             agentic_retrieval = AgenticRetrieval(
                 hybrid_retriever,
                 max_iterations=2,
@@ -375,7 +395,7 @@ async def startup_event():
             system_ready = False
 
     except Exception as e:
-        print(f"Startup failed: {e}")
+        print(f"Background initialization failed: {e}")
         import traceback
         traceback.print_exc()
         system_ready = False
