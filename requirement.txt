@@ -43,3 +43,4 @@ numpy
 fastapi
 uvicorn
 pydantic
+itsdangerous
