@@ -59,26 +59,42 @@ Documents → Document Ingestion → Chunking + Metadata
 
 ### Prerequisites
 - Python 3.14+
+- Node.js 18+ and npm (required for the React frontend)
+- `uv` (recommended) or `pip`
 - Groq API key (required)
 - Cohere API key (optional, for reranking)
 
-### Installation
+### 1. Install Python dependencies
 
-1. Clone the repository and navigate to the project directory
+From the project root:
 
-2. Install dependencies:
 ```bash
 uv sync
 ```
 
-3. Set up environment variables:
-Create a `.env` file with:
+If you are not using `uv`, create and activate a virtual environment, then install the dependencies:
+
+```bash
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
+python -m pip install -r requirement.txt
+```
+
+### 2. Configure environment variables
+
+Create a `.env` file in the project root:
+
 ```bash
 GROQ_API_KEY=your_groq_api_key_here
 COHERE_API_KEY=your_cohere_api_key_here  # Optional
 GOOGLE_CLIENT_ID=your_google_client_id_here  # Optional - for Google OAuth
 GOOGLE_CLIENT_SECRET=your_google_client_secret_here  # Optional - for Google OAuth
 ```
+
+Copy the values from `ENV_EXAMPLE.txt` if needed. Add PDF documents to `data/pdf/` before initializing the system.
 
 **Google OAuth Setup (Optional):**
 To enable Google OAuth login:
@@ -91,25 +107,36 @@ To enable Google OAuth login:
 7. Copy Client ID and Client Secret to your `.env` file
 8. Restart the backend server to enable Google login
 
-4. Place PDF documents in the `./data` directory
+### 3. Run the application
 
-5. Run the application:
+The recommended architecture uses a FastAPI backend and React frontend. Start each service in a separate terminal from the project root.
 
-**Option 1: Streamlit App (Backend + Frontend combined)**
+**Terminal 1: FastAPI backend**
 ```bash
-streamlit run evidenceflow_app.py
+python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8001
 ```
 
-**Option 2: React Frontend + FastAPI Backend**
+**Terminal 2: React frontend**
 ```bash
-# Terminal 1: Start the backend
-cd backend
-python -m uvicorn app:app --host 0.0.0.0 --port 8001
-
-# Terminal 2: Start the frontend
 cd frontend
 npm install
-npm start
+npm run dev
+```
+
+Open the application at [http://localhost:3000](http://localhost:3000). The backend API and interactive documentation are available at [http://localhost:8001](http://localhost:8001) and [http://localhost:8001/docs](http://localhost:8001/docs).
+
+The frontend defaults to `http://localhost:8001` for the API. To use another backend URL, create `frontend/.env` with:
+
+```bash
+VITE_API_URL=http://localhost:8001
+```
+
+**Streamlit alternative:**
+
+To run the combined legacy Streamlit application instead of the React/FastAPI architecture:
+
+```bash
+streamlit run evidenceflow_app.py
 ```
 
 **Default Login Credentials:**
