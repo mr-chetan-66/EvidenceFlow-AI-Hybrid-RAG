@@ -4,6 +4,7 @@ import { LogIn, Mail, Lock, User, Moon, Sun } from 'lucide-react';
 import api, { API_BASE } from './api';
 import './Login.css';
 import { applyThemePreference, loadPreferences, savePreferences } from './preferences';
+import { markFreshChatForLogin } from './chatStorage';
 
 function Login() {
   const [isLogin, setIsLogin] = useState(true);
@@ -71,6 +72,7 @@ function Login() {
         localStorage.removeItem('user');
         localStorage.setItem('token', response.data.access_token);
         localStorage.setItem('user', JSON.stringify(response.data.user));
+        markFreshChatForLogin(response.data.user);
 
         // Redirect based on role
         if (response.data.user.role === 'admin') {
@@ -98,6 +100,7 @@ function Login() {
         localStorage.removeItem('user');
         localStorage.setItem('token', loginResponse.data.access_token);
         localStorage.setItem('user', JSON.stringify(loginResponse.data.user));
+        markFreshChatForLogin(loginResponse.data.user);
 
         // Always redirect to chat for self-registered users
         navigate('/');

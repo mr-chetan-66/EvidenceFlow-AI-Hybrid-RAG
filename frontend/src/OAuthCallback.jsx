@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Loader } from 'lucide-react';
+import { markFreshChatForLogin } from './chatStorage';
 
 function OAuthCallback() {
   const [searchParams] = useSearchParams();
@@ -17,6 +18,7 @@ function OAuthCallback() {
         const decodedUser = decodeURIComponent(user);
         const userObj = JSON.parse(decodedUser);
         localStorage.setItem('user', JSON.stringify(userObj));
+        markFreshChatForLogin(userObj);
         navigate('/');
       } catch (e) {
         console.error('Error storing OAuth data:', e);

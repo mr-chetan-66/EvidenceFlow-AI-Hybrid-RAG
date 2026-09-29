@@ -9,6 +9,13 @@ import VerifyEmail from './VerifyEmail';
 import OAuthCallback from './OAuthCallback';
 import SettingsPage from './Settings';
 import { applyThemePreference, autoSaveChatsEnabled, loadPreferences, savePreferences } from './preferences';
+import {
+  clearLegacySharedChatData,
+  clearUserChatData,
+  consumeFreshChatForLogin,
+  getChatStorageKeys,
+  getChatMessagesKey,
+} from './chatStorage';
 
 // Protected Route Component
 function ProtectedRoute({ children, adminOnly = false }) {
@@ -48,11 +55,14 @@ function ChatApp() {
   const [showDetails, setShowDetails] = useState({});
   const [chatHistory, setChatHistory] = useState([]);
   const [currentChatId, setCurrentChatId] = useState(null);
+  const [chatStorageReady, setChatStorageReady] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [theme, setTheme] = useState(() => loadPreferences().theme);
   const messagesEndRef = React.useRef(null);
   const navigate = useNavigate();
-  const user = JSON.parse(localStorage.getItem('user') || '{}');
+  const [user] = useState(() => JSON.parse(localStorage.getItem('user') || '{}'));
+  const chatStorage = getChatStorageKeys(user);
+  const loadedChatScope = React.useRef(null);
 
   // Apply theme on mount and when theme changes
   useEffect(() => {
@@ -67,34 +77,52 @@ function ChatApp() {
 
   // Load chat history from localStorage on mount
   useEffect(() => {
-    const savedHistory = localStorage.getItem('chatHistory');
-    if (savedHistory) {
-      setChatHistory(JSON.parse(savedHistory));
+    if (loadedChatScope.current === chatStorage.scope) return;
+    loadedChatScope.current = chatStorage.scope;
+    clearLegacySharedChatData();
+
+    let savedHistory = [];
+    try {
+      const storedHistory = localStorage.getItem(chatStorage.historyKey);
+      savedHistory = storedHistory ? JSON.parse(storedHistory) : [];
+    } catch (error) {
+      localStorage.removeItem(chatStorage.historyKey);
     }
-    
-    const savedCurrentChatId = localStorage.getItem('currentChatId');
-    if (savedCurrentChatId) {
-      setCurrentChatId(savedCurrentChatId);
-      const savedMessages = localStorage.getItem(`chat_${savedCurrentChatId}`);
-      if (savedMessages) {
-        setMessages(JSON.parse(savedMessages));
+    setChatHistory(Array.isArray(savedHistory) ? savedHistory : []);
+
+    if (consumeFreshChatForLogin(user)) {
+      localStorage.removeItem(chatStorage.currentChatIdKey);
+      setCurrentChatId(null);
+      setMessages([]);
+    } else {
+      const savedCurrentChatId = localStorage.getItem(chatStorage.currentChatIdKey);
+      if (savedCurrentChatId) {
+        setCurrentChatId(savedCurrentChatId);
+        try {
+          const savedMessages = localStorage.getItem(getChatMessagesKey(user, savedCurrentChatId));
+          setMessages(savedMessages ? JSON.parse(savedMessages) : []);
+        } catch (error) {
+          localStorage.removeItem(getChatMessagesKey(user, savedCurrentChatId));
+          setMessages([]);
+        }
       }
     }
-  }, []);
+    setChatStorageReady(true);
+  }, [chatStorage.historyKey, chatStorage.currentChatIdKey, user]);
 
   // Save chat history to localStorage whenever it changes
   useEffect(() => {
-    if (!autoSaveChatsEnabled()) return;
-    localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
-  }, [chatHistory]);
+    if (!chatStorageReady || !autoSaveChatsEnabled()) return;
+    localStorage.setItem(chatStorage.historyKey, JSON.stringify(chatHistory));
+  }, [chatHistory, chatStorage.historyKey, chatStorageReady]);
 
   // Save current chat messages to localStorage
   useEffect(() => {
-    if (!currentChatId || !autoSaveChatsEnabled()) return;
+    if (!chatStorageReady || !currentChatId || !autoSaveChatsEnabled()) return;
 
-    localStorage.setItem(`chat_${currentChatId}`, JSON.stringify(messages));
-    localStorage.setItem('currentChatId', currentChatId);
-  }, [messages, currentChatId]);
+    localStorage.setItem(getChatMessagesKey(user, currentChatId), JSON.stringify(messages));
+    localStorage.setItem(chatStorage.currentChatIdKey, currentChatId);
+  }, [messages, currentChatId, chatStorage.currentChatIdKey, chatStorageReady, user]);
 
   // Check system status on mount
   useEffect(() => {
@@ -189,11 +217,12 @@ function ChatApp() {
   const createNewChat = () => {
     setCurrentChatId(null);
     setMessages([]);
+    localStorage.removeItem(chatStorage.currentChatIdKey);
   };
 
   const switchChat = (chatId) => {
     setCurrentChatId(chatId);
-    const savedMessages = localStorage.getItem(`chat_${chatId}`);
+    const savedMessages = localStorage.getItem(getChatMessagesKey(user, chatId));
     if (savedMessages) {
       setMessages(JSON.parse(savedMessages));
     } else {
@@ -204,7 +233,7 @@ function ChatApp() {
   const deleteChat = (chatId, e) => {
     e.stopPropagation();
     setChatHistory(prev => prev.filter(chat => chat.id !== chatId));
-    localStorage.removeItem(`chat_${chatId}`);
+    localStorage.removeItem(getChatMessagesKey(user, chatId));
     
     if (currentChatId === chatId) {
       createNewChat();
@@ -216,14 +245,7 @@ function ChatApp() {
       setChatHistory([]);
       setMessages([]);
       setCurrentChatId(null);
-      // Clear all chat data from localStorage
-      Object.keys(localStorage).forEach(key => {
-        if (key.startsWith('chat_')) {
-          localStorage.removeItem(key);
-        }
-      });
-      localStorage.removeItem('chatHistory');
-      localStorage.removeItem('currentChatId');
+      clearUserChatData(user);
     }
   };
 

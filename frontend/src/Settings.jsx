@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Shield, Moon, Sun, Monitor, Save, LogOut, Trash2, Bell, Lock, User, Database } from 'lucide-react';
 import api from './api';
 import { applyThemePreference, loadPreferences, savePreferences } from './preferences';
+import { clearUserChatData } from './chatStorage';
 
 function Settings() {
   const navigate = useNavigate();
@@ -75,13 +76,7 @@ function Settings() {
 
   const clearChatHistory = () => {
     if (window.confirm('Are you sure you want to delete all chat history?')) {
-      Object.keys(localStorage).forEach(key => {
-        if (key.startsWith('chat_')) {
-          localStorage.removeItem(key);
-        }
-      });
-      localStorage.removeItem('chatHistory');
-      localStorage.removeItem('currentChatId');
+      clearUserChatData(user);
       alert('Chat history cleared successfully!');
     }
   };
