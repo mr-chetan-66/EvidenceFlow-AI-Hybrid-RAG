@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -98,6 +99,7 @@ indexing_status = {
     "logs": [],
     "started_at": None,
     "updated_at": None,
+    "updated_at_epoch": 0,
     "error": None,
 }
 
@@ -116,6 +118,7 @@ def start_indexing_operation(operation):
             "logs": [{"time": timestamp, "message": f"{operation} started"}],
             "started_at": timestamp,
             "updated_at": timestamp,
+            "updated_at_epoch": time.time(),
             "error": None,
         }
     return True
@@ -127,6 +130,7 @@ def report_indexing_progress(stage, message, progress):
         indexing_status["stage"] = stage
         indexing_status["progress"] = progress
         indexing_status["updated_at"] = timestamp
+        indexing_status["updated_at_epoch"] = time.time()
         indexing_status["logs"] = (indexing_status["logs"] + [
             {"time": timestamp, "message": message}
         ])[-80:]
@@ -146,6 +150,7 @@ def finish_indexing_operation(result=None, error=None):
         indexing_status["stage"] = "complete" if succeeded else "failed"
         indexing_status["progress"] = 100 if succeeded else indexing_status["progress"]
         indexing_status["updated_at"] = timestamp
+        indexing_status["updated_at_epoch"] = time.time()
         indexing_status["error"] = str(error) if error is not None else None
         indexing_status["logs"] = (indexing_status["logs"] + [
             {"time": timestamp, "message": message}
@@ -1124,6 +1129,32 @@ def schedule_indexing_operation(operation):
 async def get_admin_indexing_status(current_user: User = Depends(require_admin)):
     """Return the current indexing operation and its recent progress messages."""
     return get_indexing_status_snapshot()
+
+
+@app.post("/admin/indexing-status/reset")
+async def reset_admin_indexing_status(
+    updated_at_epoch: float,
+    current_user: User = Depends(require_admin),
+):
+    """Reset finished console output only if no newer operation has started."""
+    global indexing_status
+    with indexing_status_lock:
+        if indexing_status["active"]:
+            raise HTTPException(status_code=409, detail="Cannot reset an active indexing operation")
+        if indexing_status["updated_at_epoch"] != updated_at_epoch:
+            raise HTTPException(status_code=409, detail="Indexing status changed before reset")
+        indexing_status = {
+            "active": False,
+            "operation": None,
+            "stage": "idle",
+            "progress": 0,
+            "logs": [],
+            "started_at": None,
+            "updated_at": None,
+            "updated_at_epoch": 0,
+            "error": None,
+        }
+    return {"message": "Process console reset"}
 
 
 @app.post("/admin/upload")

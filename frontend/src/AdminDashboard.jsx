@@ -46,11 +46,17 @@ function AdminDashboard() {
   });
   const [createdUserInfo, setCreatedUserInfo] = useState(null);
   const lastTerminalStatusRef = React.useRef(null);
+  const consoleOutputRef = React.useRef(null);
   const [theme, setTheme] = useState(() => loadPreferences().theme);
   const navigate = useNavigate();
 
   const currentUser = JSON.parse(localStorage.getItem('user') || '{}');
   const indexingActionInProgress = Boolean(indexingStatus?.active) || uploading || reindexing || reinitializing || clearingVectors;
+  const indexingStatusIsStale = Boolean(
+    indexingStatus?.active &&
+    indexingStatus.updated_at_epoch &&
+    Date.now() / 1000 - indexingStatus.updated_at_epoch >= 30
+  );
 
   const fetchIndexingStatus = async () => {
     try {
@@ -81,6 +87,31 @@ function AdminDashboard() {
     const pollingTimer = window.setInterval(fetchIndexingStatus, 1200);
     return () => window.clearInterval(pollingTimer);
   }, []);
+
+  useEffect(() => {
+    if (
+      !indexingStatus ||
+      indexingStatus.active ||
+      !['complete', 'failed'].includes(indexingStatus.stage) ||
+      !indexingStatus.updated_at_epoch
+    ) return;
+
+    const completedAt = indexingStatus.updated_at_epoch;
+    const resetTimer = window.setTimeout(async () => {
+      try {
+        await api.post('/admin/indexing-status/reset', null, {
+          params: { updated_at_epoch: completedAt },
+        });
+        await fetchIndexingStatus();
+      } catch (error) {
+        if (error.response?.status !== 409) {
+          console.error('Failed to reset completed process console:', error);
+        }
+      }
+    }, 30000);
+
+    return () => window.clearTimeout(resetTimer);
+  }, [indexingStatus?.active, indexingStatus?.stage, indexingStatus?.updated_at_epoch]);
 
   const fetchDocuments = async () => {
     try {
@@ -123,6 +154,11 @@ function AdminDashboard() {
     fetchDocuments();
     fetchSystemStatus();
   }, [indexingStatus]);
+
+  useEffect(() => {
+    const output = consoleOutputRef.current;
+    if (output) output.scrollTop = output.scrollHeight;
+  }, [indexingStatus?.logs?.length, indexingStatus?.updated_at_epoch, indexingStatusIsStale]);
 
   const handleDeleteDocument = async (filename) => {
     if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
@@ -479,20 +515,24 @@ function AdminDashboard() {
             </button>
           </div>
 
-          <section className="min-h-[256px] rounded-xl border border-emerald-900/50 bg-[#111714] p-5 text-emerald-100 shadow-inner flex flex-col" aria-label="Indexing process console">
-            <header className="mb-4 flex items-center justify-between border-b border-emerald-900/70 pb-3">
+          <section className="h-[256px] min-h-0 overflow-hidden rounded-xl border border-emerald-900/50 bg-[#111714] p-5 text-emerald-100 shadow-inner flex flex-col" aria-label="Indexing process console">
+            <header className="mb-4 flex shrink-0 items-center justify-between border-b border-emerald-900/70 pb-3">
               <div className="flex items-center gap-2">
                 <Activity className="h-5 w-5 text-emerald-400" />
                 <h3 className="font-semibold text-emerald-100">Process Console</h3>
               </div>
               <span className={`flex items-center gap-2 font-mono text-[11px] uppercase ${indexingStatus?.active ? 'text-emerald-300' : 'text-emerald-700'}`}>
                 <span className={`h-2 w-2 rounded-full ${indexingStatus?.active ? 'animate-pulse bg-emerald-400' : 'bg-emerald-800'}`} />
-                {indexingStatus?.active ? 'Running' : indexingStatus?.stage === 'complete' ? 'Complete' : indexingStatus?.stage === 'failed' ? 'Failed' : 'Idle'}
+                {indexingStatusIsStale ? 'No Update' : indexingStatus?.active ? 'Running' : indexingStatus?.stage === 'complete' ? 'Complete' : indexingStatus?.stage === 'failed' ? 'Failed' : 'Idle'}
               </span>
             </header>
 
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto font-mono text-xs" role="log" aria-live="polite" aria-relevant="additions text">
-              {indexingStatus?.logs?.length ? indexingStatus.logs.map((entry, index) => (
+            <div ref={consoleOutputRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain font-mono text-xs" role="log" aria-live="polite" aria-relevant="additions text">
+              {indexingStatusIsStale ? (
+                <div className="text-amber-300">
+                  No process output for 30 seconds. The backend still reports this job as active; output is cleared, but the job has not been cancelled.
+                </div>
+              ) : indexingStatus?.logs?.length ? indexingStatus.logs.map((entry, index) => (
                 <div key={`${entry.time}-${index}`} className="flex items-start gap-2 break-words">
                   <time className="shrink-0 text-emerald-700">[{entry.time}]</time>
                   <span className={indexingStatus.stage === 'failed' && index === indexingStatus.logs.length - 1 ? 'text-rose-300' : 'text-emerald-200'}>
@@ -504,7 +544,7 @@ function AdminDashboard() {
               )}
             </div>
 
-            <footer className="mt-4 border-t border-emerald-900/70 pt-3">
+            <footer className="mt-4 shrink-0 border-t border-emerald-900/70 pt-3">
               <div className="mb-2 flex justify-between font-mono text-[10px] uppercase text-emerald-700">
                 <span>{indexingStatus?.operation || 'No active operation'}</span>
                 <span>{indexingStatus?.progress || 0}%</span>
