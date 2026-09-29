@@ -249,7 +249,10 @@ function ChatApp() {
   return (
     <div className="chat-shell min-h-screen relative overflow-hidden bg-orange-50 bg-beige-paper flex">
       {/* Sidebar */}
-      <div className={`chat-sidebar transition-all duration-300 ${showSidebar ? 'w-64' : 'w-0'} border-r border-orange-200 bg-beige-100/95 backdrop-blur-xl flex flex-col h-screen fixed left-0 top-0 z-20`}>
+      <div
+        aria-hidden={!showSidebar}
+        className={`chat-sidebar shrink-0 overflow-hidden transition-all duration-300 ${showSidebar ? 'w-64 border-r border-orange-200' : 'w-0 border-r-0 pointer-events-none'} bg-beige-100/95 backdrop-blur-xl flex flex-col h-screen fixed left-0 top-0 z-20`}
+      >
         <div className="p-4 border-b border-orange-200">
           <button
             onClick={createNewChat}
@@ -326,9 +329,7 @@ function ChatApp() {
                   <div className="w-6 h-0.5 bg-orange-600"></div>
                 </div>
               </button>
-              <div className="w-10 h-10 bg-orange-600 rounded-xl flex items-center justify-center shadow-lg shadow-orange-500/30 border border-orange-400" style={{background: '#f74b03', borderColor: '#f74b03'}}>
-                <Sparkles className="w-6 h-6 text-white" />
-              </div>
+              <img src="/evidenceflow-mark.svg" alt="EvidenceFlow AI logo" className="w-10 h-10 shrink-0" />
               <div>
                 <h1 className="text-xl font-bold text-orange-900">EvidenceFlow AI</h1>
                 <p className="text-xs text-orange-700">Enterprise Knowledge System</p>

@@ -9,7 +9,7 @@ def process_all_pdfs(pdf_directory):
     print(f"Looking for PDFs in: {pdf_dir}")
     print(f"Directory exists: {pdf_dir.exists()}")
     
-    pdf_files = list(pdf_dir.rglob("*.pdf"))
+    pdf_files = [path for path in pdf_dir.rglob("*") if path.is_file() and path.suffix.lower() == ".pdf"]
     print(f"Found {len(pdf_files)} PDF files")
     
     for pdf_file in pdf_files:

@@ -110,7 +110,7 @@ function AdminDashboard() {
       alert(`Reindex completed: ${response.data.document_count} documents, ${response.data.chunk_count} chunks`);
       await Promise.all([fetchDocuments(), fetchSystemStatus()]);
     } catch (error) {
-      alert('Reindex failed');
+      alert('Reindex failed: ' + (error.response?.data?.detail || error.message));
     } finally {
       setReindexing(false);
     }
@@ -200,10 +200,7 @@ function AdminDashboard() {
       <header className="border-b border-orange-200 backdrop-blur-xl bg-beige-100/90 shadow-md shadow-orange-500/10">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg"
-              style={{background: '#f74b03', borderColor: '#f74b03'}}>
-              <Shield className="w-6 h-6 text-white" />
-            </div>
+            <img src="/evidenceflow-mark.svg" alt="EvidenceFlow AI logo" className="w-10 h-10 shrink-0" />
             <div>
               <h1 className="text-xl font-bold text-orange-900">Admin Dashboard</h1>
               <p className="text-xs text-orange-700">EvidenceFlow AI Management</p>

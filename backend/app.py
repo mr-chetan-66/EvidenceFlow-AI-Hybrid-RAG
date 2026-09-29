@@ -84,6 +84,8 @@ hybrid_retriever = None
 agentic_retrieval = None
 cache = None
 system_ready = False
+rag_initialization_task = None
+rag_rebuild_lock = asyncio.Lock()
 
 # PostgreSQL support
 postgres_engine = None
@@ -337,7 +339,7 @@ class SystemStatus(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Fast startup — bind the port immediately, load heavy stuff in the background"""
-    global system_ready
+    global system_ready, rag_initialization_task
 
     print("Starting EvidenceFlow AI backend...")
 
@@ -355,7 +357,7 @@ async def startup_event():
     # Don't block startup on model/vectorstore loading (this is what was
     # stalling Uvicorn long enough for Render's port scan to time out).
     # Kick it off in the background instead so the port opens right away.
-    asyncio.create_task(initialize_rag_system())
+    rag_initialization_task = asyncio.create_task(initialize_rag_system())
 
 
 async def initialize_rag_system():
@@ -946,7 +948,9 @@ async def list_documents(current_user: User = Depends(require_admin)):
         
         documents = []
         if pdf_dir.exists():
-            for pdf_file in pdf_dir.glob("*.pdf"):
+            for pdf_file in pdf_dir.iterdir():
+                if not pdf_file.is_file() or pdf_file.suffix.lower() != ".pdf":
+                    continue
                 stat = pdf_file.stat()
                 documents.append({
                     "filename": pdf_file.name,
@@ -983,7 +987,6 @@ def rebuild_document_index():
     global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
     from pathlib import Path
 
-    system_ready = False
     project_root = Path(__file__).resolve().parents[1]
     pdf_dir = project_root / "data" / "pdf"
     pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -996,6 +999,9 @@ def rebuild_document_index():
         embedding_manager = EmbeddingManager()
     if vectorstore is None:
         vectorstore = VectorStore()
+
+    embeddings = embedding_manager.genetate_embedding(texts) if texts else []
+    system_ready = False
     vectorstore.client.delete_collection(name=vectorstore.collection_name)
     vectorstore.collection = vectorstore.client.get_or_create_collection(
         name=vectorstore.collection_name,
@@ -1003,7 +1009,6 @@ def rebuild_document_index():
     )
 
     if texts:
-        embeddings = embedding_manager.genetate_embedding(texts)
         vectorstore.add_documents(all_chunks, embeddings)
 
     hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
@@ -1020,6 +1025,11 @@ def rebuild_document_index():
     cache = CAGCache(embedding_manager=embedding_manager)
     system_ready = True
     return {"document_count": len(all_documents), "chunk_count": len(all_chunks)}
+
+
+async def wait_for_rag_initialization():
+    if rag_initialization_task is not None:
+        await rag_initialization_task
 
 
 @app.post("/admin/upload")
@@ -1045,11 +1055,14 @@ async def upload_document(
             filename = Path(uploaded_file.filename or "").name
             if not filename or Path(filename).suffix.lower() != ".pdf":
                 raise HTTPException(status_code=400, detail="Only PDF files can be uploaded")
-            with (pdf_dir / filename).open("wb") as buffer:
-                shutil.copyfileobj(uploaded_file.file, buffer)
             saved_filenames.append(filename)
 
-        counts = rebuild_document_index()
+        await wait_for_rag_initialization()
+        async with rag_rebuild_lock:
+            for uploaded_file, filename in zip(selected_files, saved_filenames):
+                with (pdf_dir / filename).open("wb") as buffer:
+                    shutil.copyfileobj(uploaded_file.file, buffer)
+            counts = await asyncio.to_thread(rebuild_document_index)
         return {
             "message": "Selected documents uploaded and embedded successfully",
             "uploaded_files": saved_filenames,
@@ -1250,7 +1263,9 @@ async def verify_email(token: str):
 async def reindex_documents(current_user: User = Depends(require_admin)):
     """Reindex all documents (clear and rebuild vector store)"""
     try:
-        counts = rebuild_document_index()
+        await wait_for_rag_initialization()
+        async with rag_rebuild_lock:
+            counts = await asyncio.to_thread(rebuild_document_index)
         return {"message": "Documents reindexed successfully", **counts}
     except Exception as e:
         import traceback

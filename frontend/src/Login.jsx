@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogIn, Mail, Lock, User, Shield, Moon, Sun } from 'lucide-react';
+import { LogIn, Mail, Lock, User, Moon, Sun } from 'lucide-react';
 import api, { API_BASE } from './api';
 import './Login.css';
 import { applyThemePreference, loadPreferences, savePreferences } from './preferences';
@@ -124,10 +124,7 @@ function Login() {
         <div className="bg-beige-100 rounded-xl shadow-lg p-8 border-2 border-orange-200 login-card">
           {/* Header */}
           <div className="text-center mb-8">
-            <div className="w-12 h-12 rounded-lg flex items-center justify-center mx-auto mb-4 shadow-lg"
-              style={{background: '#f74b03', borderColor: '#FFA500'}}>
-              <Shield className="w-6 h-6 text-white" />
-            </div>
+            <img src="/evidenceflow-mark.svg" alt="EvidenceFlow AI logo" className="w-12 h-12 mx-auto mb-4" />
             <h1 className="text-2xl font-bold text-orange-900 mb-2">
               {isLogin ? 'Welcome back' : 'Create your account'}
             </h1>
