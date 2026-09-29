@@ -5,6 +5,7 @@ Production-ready REST API for the RAG system with Authentication
 from __future__ import annotations
 
 import asyncio
+import threading
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -86,6 +87,68 @@ cache = None
 system_ready = False
 rag_initialization_task = None
 rag_rebuild_lock = asyncio.Lock()
+indexing_status_lock = threading.Lock()
+indexing_status = {
+    "active": False,
+    "operation": None,
+    "stage": "idle",
+    "progress": 0,
+    "logs": [],
+    "started_at": None,
+    "updated_at": None,
+    "error": None,
+}
+
+
+def start_indexing_operation(operation):
+    global indexing_status
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    with indexing_status_lock:
+        indexing_status = {
+            "active": True,
+            "operation": operation,
+            "stage": "starting",
+            "progress": 0,
+            "logs": [{"time": timestamp, "message": f"{operation} started"}],
+            "started_at": timestamp,
+            "updated_at": timestamp,
+            "error": None,
+        }
+
+
+def report_indexing_progress(stage, message, progress):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    with indexing_status_lock:
+        indexing_status["stage"] = stage
+        indexing_status["progress"] = progress
+        indexing_status["updated_at"] = timestamp
+        indexing_status["logs"] = (indexing_status["logs"] + [
+            {"time": timestamp, "message": message}
+        ])[-80:]
+
+
+def finish_indexing_operation(result=None, error=None):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    with indexing_status_lock:
+        succeeded = error is None
+        message = (
+            f"Completed: {result['document_count']} documents, {result['chunk_count']} chunks"
+            if succeeded
+            else f"Failed: {error}"
+        )
+        indexing_status["active"] = False
+        indexing_status["stage"] = "complete" if succeeded else "failed"
+        indexing_status["progress"] = 100 if succeeded else indexing_status["progress"]
+        indexing_status["updated_at"] = timestamp
+        indexing_status["error"] = str(error) if error is not None else None
+        indexing_status["logs"] = (indexing_status["logs"] + [
+            {"time": timestamp, "message": message}
+        ])[-80:]
+
+
+def get_indexing_status_snapshot():
+    with indexing_status_lock:
+        return {**indexing_status, "logs": list(indexing_status["logs"])}
 
 # PostgreSQL support
 postgres_engine = None
@@ -450,9 +513,7 @@ async def get_status(current_user: User = Depends(get_current_user)):
 async def initialize_system(current_user: User = Depends(require_admin)):
     """Initialize or recover the embedding and retrieval system from stored PDFs."""
     try:
-        await wait_for_rag_initialization()
-        async with rag_rebuild_lock:
-            counts = await asyncio.to_thread(rebuild_document_index)
+        counts = await run_tracked_rebuild("reinitialize")
         return {"message": "System reinitialized successfully", **counts}
     except Exception as e:
         import traceback
@@ -924,7 +985,7 @@ async def delete_document(filename: str, current_user: User = Depends(require_ad
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def rebuild_document_index():
+def rebuild_document_index(operation="reindex"):
     """Rebuild retrieval state from PDFs in the project's persistent data directory."""
     global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
     from pathlib import Path
@@ -933,17 +994,31 @@ def rebuild_document_index():
     pdf_dir = project_root / "data" / "pdf"
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
+    report_indexing_progress("loading_pdfs", "Loading uploaded PDF documents", 12)
     all_documents = process_all_pdfs(str(pdf_dir))
+    report_indexing_progress(
+        "chunking_documents",
+        f"Loaded {len(all_documents)} pages; splitting into text chunks",
+        25,
+    )
     all_chunks = chunk_documnents(all_documents)
     texts = [doc.page_content for doc in all_chunks]
 
     if embedding_manager is None:
+        report_indexing_progress("loading_model", "Loading the embedding model", 35)
         embedding_manager = EmbeddingManager()
     if vectorstore is None:
+        report_indexing_progress("opening_vector_store", "Opening the vector store", 42)
         vectorstore = VectorStore()
 
+    report_indexing_progress(
+        "generating_embeddings",
+        f"Generating embeddings for {len(texts)} chunks",
+        55,
+    )
     embeddings = embedding_manager.genetate_embedding(texts) if texts else []
     system_ready = False
+    report_indexing_progress("rebuilding_vector_store", "Replacing the vector index", 76)
     vectorstore.client.delete_collection(name=vectorstore.collection_name)
     vectorstore.collection = vectorstore.client.get_or_create_collection(
         name=vectorstore.collection_name,
@@ -953,6 +1028,7 @@ def rebuild_document_index():
     if texts:
         vectorstore.add_documents(all_chunks, embeddings)
 
+    report_indexing_progress("building_retriever", "Building keyword and vector retrievers", 90)
     hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
     if texts:
         hybrid_retriever.index_documents(texts)
@@ -966,12 +1042,34 @@ def rebuild_document_index():
         cache.invalidate()
     cache = CAGCache(embedding_manager=embedding_manager)
     system_ready = True
+    report_indexing_progress("ready", "Embedding system is ready", 98)
     return {"document_count": len(all_documents), "chunk_count": len(all_chunks)}
 
 
 async def wait_for_rag_initialization():
     if rag_initialization_task is not None:
         await rag_initialization_task
+
+
+async def run_tracked_rebuild(operation):
+    async with rag_rebuild_lock:
+        start_indexing_operation(operation)
+        try:
+            if rag_initialization_task is not None and not rag_initialization_task.done():
+                report_indexing_progress("waiting_for_startup", "Waiting for startup model initialization", 3)
+            await wait_for_rag_initialization()
+            result = await asyncio.to_thread(rebuild_document_index, operation)
+        except Exception as error:
+            finish_indexing_operation(error=error)
+            raise
+        finish_indexing_operation(result=result)
+        return result
+
+
+@app.get("/admin/indexing-status")
+async def get_admin_indexing_status(current_user: User = Depends(require_admin)):
+    """Return the current indexing operation and its recent progress messages."""
+    return get_indexing_status_snapshot()
 
 
 @app.post("/admin/upload")
@@ -999,12 +1097,25 @@ async def upload_document(
                 raise HTTPException(status_code=400, detail="Only PDF files can be uploaded")
             saved_filenames.append(filename)
 
-        await wait_for_rag_initialization()
         async with rag_rebuild_lock:
-            for uploaded_file, filename in zip(selected_files, saved_filenames):
-                with (pdf_dir / filename).open("wb") as buffer:
-                    shutil.copyfileobj(uploaded_file.file, buffer)
-            counts = await asyncio.to_thread(rebuild_document_index)
+            start_indexing_operation("upload")
+            try:
+                if rag_initialization_task is not None and not rag_initialization_task.done():
+                    report_indexing_progress("waiting_for_startup", "Waiting for startup model initialization", 3)
+                await wait_for_rag_initialization()
+                for index, (uploaded_file, filename) in enumerate(zip(selected_files, saved_filenames)):
+                    report_indexing_progress(
+                        "saving_uploads",
+                        f"Saving {filename}",
+                        5 + int(8 * (index + 1) / len(selected_files)),
+                    )
+                    with (pdf_dir / filename).open("wb") as buffer:
+                        shutil.copyfileobj(uploaded_file.file, buffer)
+                counts = await asyncio.to_thread(rebuild_document_index, "upload")
+            except Exception as error:
+                finish_indexing_operation(error=error)
+                raise
+            finish_indexing_operation(result=counts)
         return {
             "message": "Selected documents uploaded and embedded successfully",
             "uploaded_files": saved_filenames,
@@ -1205,9 +1316,7 @@ async def verify_email(token: str):
 async def reindex_documents(current_user: User = Depends(require_admin)):
     """Reindex all documents (clear and rebuild vector store)"""
     try:
-        await wait_for_rag_initialization()
-        async with rag_rebuild_lock:
-            counts = await asyncio.to_thread(rebuild_document_index)
+        counts = await run_tracked_rebuild("reindex")
         return {"message": "Documents reindexed successfully", **counts}
     except Exception as e:
         import traceback

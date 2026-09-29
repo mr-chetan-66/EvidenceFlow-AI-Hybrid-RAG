@@ -31,6 +31,7 @@ function AdminDashboard() {
   const [reindexing, setReindexing] = useState(false);
   const [reinitializing, setReinitializing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [indexingStatus, setIndexingStatus] = useState(null);
   const [documentsExpanded, setDocumentsExpanded] = useState(false);
   const [usersExpanded, setUsersExpanded] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState([]);
@@ -47,6 +48,16 @@ function AdminDashboard() {
   const navigate = useNavigate();
 
   const currentUser = JSON.parse(localStorage.getItem('user') || '{}');
+  const indexingActionInProgress = uploading || reindexing || reinitializing;
+
+  const fetchIndexingStatus = async () => {
+    try {
+      const response = await api.get('/admin/indexing-status');
+      setIndexingStatus(response.data);
+    } catch (error) {
+      console.error('Failed to fetch indexing status:', error);
+    }
+  };
 
   useEffect(() => {
     if (currentUser.role !== 'admin') {
@@ -60,6 +71,14 @@ function AdminDashboard() {
     applyThemePreference(theme);
     savePreferences({ theme });
   }, [theme]);
+
+  useEffect(() => {
+    if (currentUser.role !== 'admin') return;
+
+    fetchIndexingStatus();
+    const pollingTimer = window.setInterval(fetchIndexingStatus, 1200);
+    return () => window.clearInterval(pollingTimer);
+  }, []);
 
   const fetchDocuments = async () => {
     try {
@@ -340,7 +359,7 @@ function AdminDashboard() {
             <button
               type="button"
               onClick={handleFileUpload}
-              disabled={uploading || selectedFiles.length === 0}
+              disabled={indexingActionInProgress || selectedFiles.length === 0}
               className="mt-4 px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
               style={{background: '#f74b03'}}
             >
@@ -368,7 +387,7 @@ function AdminDashboard() {
             </p>
             <button
               onClick={handleReindex}
-              disabled={reindexing}
+              disabled={indexingActionInProgress}
               className="px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
               style={{background: '#f74b03'}}
               onMouseEnter={(e) => e.target.style.background = '#cc3c02'}
@@ -398,7 +417,7 @@ function AdminDashboard() {
             </p>
             <button
               onClick={handleReinitialize}
-              disabled={reinitializing}
+              disabled={indexingActionInProgress}
               className="px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
               style={{background: '#f74b03'}}
             >
@@ -415,6 +434,45 @@ function AdminDashboard() {
               )}
             </button>
           </div>
+
+          <section className="min-h-[256px] rounded-xl border border-emerald-900/50 bg-[#111714] p-5 text-emerald-100 shadow-inner flex flex-col" aria-label="Indexing process console">
+            <header className="mb-4 flex items-center justify-between border-b border-emerald-900/70 pb-3">
+              <div className="flex items-center gap-2">
+                <Activity className="h-5 w-5 text-emerald-400" />
+                <h3 className="font-semibold text-emerald-100">Process Console</h3>
+              </div>
+              <span className={`flex items-center gap-2 font-mono text-[11px] uppercase ${indexingStatus?.active ? 'text-emerald-300' : 'text-emerald-700'}`}>
+                <span className={`h-2 w-2 rounded-full ${indexingStatus?.active ? 'animate-pulse bg-emerald-400' : 'bg-emerald-800'}`} />
+                {indexingStatus?.active ? 'Running' : indexingStatus?.stage === 'complete' ? 'Complete' : indexingStatus?.stage === 'failed' ? 'Failed' : 'Idle'}
+              </span>
+            </header>
+
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto font-mono text-xs" role="log" aria-live="polite" aria-relevant="additions text">
+              {indexingStatus?.logs?.length ? indexingStatus.logs.map((entry, index) => (
+                <div key={`${entry.time}-${index}`} className="flex items-start gap-2 break-words">
+                  <time className="shrink-0 text-emerald-700">[{entry.time}]</time>
+                  <span className={indexingStatus.stage === 'failed' && index === indexingStatus.logs.length - 1 ? 'text-rose-300' : 'text-emerald-200'}>
+                    {entry.message}
+                  </span>
+                </div>
+              )) : (
+                <div className="text-emerald-700">Waiting for upload, reindex, or reinitialize...</div>
+              )}
+            </div>
+
+            <footer className="mt-4 border-t border-emerald-900/70 pt-3">
+              <div className="mb-2 flex justify-between font-mono text-[10px] uppercase text-emerald-700">
+                <span>{indexingStatus?.operation || 'No active operation'}</span>
+                <span>{indexingStatus?.progress || 0}%</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-emerald-950">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${indexingStatus?.stage === 'failed' ? 'bg-rose-500' : 'bg-emerald-400'}`}
+                  style={{ width: `${indexingStatus?.progress || 0}%` }}
+                />
+              </div>
+            </footer>
+          </section>
         </div>
 
         {/* Documents List */}
