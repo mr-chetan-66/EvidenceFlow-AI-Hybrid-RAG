@@ -2,6 +2,8 @@
 FastAPI Backend for EvidenceFlow AI
 Production-ready REST API for the RAG system with Authentication
 """
+from __future__ import annotations
+
 import asyncio
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
