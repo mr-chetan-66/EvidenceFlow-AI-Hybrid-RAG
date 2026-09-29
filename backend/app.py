@@ -447,71 +447,13 @@ async def get_status(current_user: User = Depends(get_current_user)):
 
 
 @app.post("/initialize")
-async def initialize_system():
-    """Initialize system with documents"""
-    global embedding_manager, vectorstore, hybrid_retrieval, agentic_retrieval, cache, system_ready
-    
+async def initialize_system(current_user: User = Depends(require_admin)):
+    """Initialize or recover the embedding and retrieval system from stored PDFs."""
     try:
-        # Load documents - use the same relative path as Streamlit app
-        print("Starting document loading...")
-        import os
-        # Change to project root directory first
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        os.chdir(project_root)
-        print(f"Changed working directory to: {os.getcwd()}")
-        
-        all_documents = process_all_pdfs("./data/pdf")
-        print(f"Loaded {len(all_documents)} documents")
-        
-        # Check if we got any documents
-        if len(all_documents) == 0:
-            return {
-                "message": "No documents found in the specified path",
-                "document_count": 0,
-                "chunk_count": 0
-            }
-        
-        # Limit for speed
-        if len(all_documents) > 500:
-            all_documents = all_documents[:500]
-        
-        # Chunk documents
-        all_chunks = chunk_documnents(all_documents)
-        
-        # Check if we got any chunks
-        if len(all_chunks) == 0:
-            return {
-                "message": "No chunks created from documents",
-                "document_count": len(all_documents),
-                "chunk_count": 0
-            }
-        
-        # Generate embeddings
-        texts = [doc.page_content for doc in all_chunks]
-        embeddings = embedding_manager.genetate_embedding(texts)
-        
-        # Store in vector store
-        vectorstore.add_documents(all_chunks, embeddings)
-        
-        # Initialize retrievers
-        hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-        hybrid_retriever.index_documents(texts)
-        agentic_retrieval = AgenticRetrieval(
-            hybrid_retriever,
-            max_iterations=2,
-            enable_reranking=True,
-            enable_citation_check=False
-        )
-        cache = CAGCache(embedding_manager=embedding_manager)
-        
-        system_ready = True
-        
-        return {
-            "message": "System initialized successfully",
-            "document_count": len(all_documents),
-            "chunk_count": len(all_chunks)
-        }
-        
+        await wait_for_rag_initialization()
+        async with rag_rebuild_lock:
+            counts = await asyncio.to_thread(rebuild_document_index)
+        return {"message": "System reinitialized successfully", **counts}
     except Exception as e:
         import traceback
         traceback.print_exc()

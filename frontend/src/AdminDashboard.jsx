@@ -16,7 +16,8 @@ import {
   Edit,
   Moon,
   Sun,
-  Settings
+  Settings,
+  ChevronDown
 } from 'lucide-react';
 import api, { API_BASE } from './api';
 import './AdminDashboard.css';
@@ -28,7 +29,10 @@ function AdminDashboard() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [reindexing, setReindexing] = useState(false);
+  const [reinitializing, setReinitializing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [documentsExpanded, setDocumentsExpanded] = useState(false);
+  const [usersExpanded, setUsersExpanded] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [userLoadError, setUserLoadError] = useState('');
   const [showUserModal, setShowUserModal] = useState(false);
@@ -113,6 +117,21 @@ function AdminDashboard() {
       alert('Reindex failed: ' + (error.response?.data?.detail || error.message));
     } finally {
       setReindexing(false);
+    }
+  };
+
+  const handleReinitialize = async () => {
+    if (!confirm('Rebuild the embedding model index from all uploaded documents?')) return;
+
+    setReinitializing(true);
+    try {
+      const response = await api.post('/initialize');
+      alert(`System reinitialized: ${response.data.document_count} documents, ${response.data.chunk_count} chunks`);
+      await Promise.all([fetchDocuments(), fetchSystemStatus()]);
+    } catch (error) {
+      alert('System reinitialization failed: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setReinitializing(false);
     }
   };
 
@@ -368,43 +387,85 @@ function AdminDashboard() {
               )}
             </button>
           </div>
+
+          <div className="bg-beige-100 backdrop-blur-sm rounded-xl p-6 border border-orange-300">
+            <h3 className="text-lg font-semibold text-orange-900 mb-4 flex items-center gap-2">
+              <Database className="w-5 h-5 text-orange-600" />
+              Reinitialize Embedding System
+            </h3>
+            <p className="text-sm text-orange-700 mb-4">
+              Recover the embedding model and rebuild its index from uploaded documents
+            </p>
+            <button
+              onClick={handleReinitialize}
+              disabled={reinitializing}
+              className="px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
+              style={{background: '#f74b03'}}
+            >
+              {reinitializing ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Reinitializing...
+                </>
+              ) : (
+                <>
+                  <Database className="w-4 h-4" />
+                  Reinitialize System
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Documents List */}
         <div className="bg-beige-100 backdrop-blur-sm rounded-xl border border-orange-300">
-          <div className="p-6 border-b border-orange-300">
-            <h3 className="text-lg font-semibold text-orange-900 flex items-center gap-2">
-              <FileText className="w-5 h-5 text-orange-600" />
-              Uploaded Documents ({documents.length})
-            </h3>
+          <div className="border-b border-orange-300">
+            <button
+              type="button"
+              onClick={() => setDocumentsExpanded(!documentsExpanded)}
+              aria-expanded={documentsExpanded}
+              aria-controls="admin-documents-list"
+              className="w-full p-6 flex items-center justify-between text-left hover:bg-orange-100 transition"
+            >
+              <span className="text-lg font-semibold text-orange-900 flex items-center gap-2">
+                <FileText className="w-5 h-5 text-orange-600" />
+                Uploaded Documents ({documents.length})
+              </span>
+              <ChevronDown className={`w-5 h-5 text-orange-700 transition-transform ${documentsExpanded ? 'rotate-180' : ''}`} />
+            </button>
           </div>
-          
-          {documents.length === 0 ? (
-            <div className="p-12 text-center">
-              <FileText className="w-16 h-16 text-orange-300 mx-auto mb-4" />
-              <p className="text-orange-600">No documents uploaded yet</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-orange-200">
-              {documents.map((doc) => (
-                <div key={doc.filename} className="p-4 flex items-center justify-between hover:bg-orange-200 transition">
-                  <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
-                      <FileText className="w-5 h-5 text-orange-600" />
-                    </div>
-                    <div>
-                      <div className="text-orange-900 font-medium">{doc.filename}</div>
-                      <div className="text-sm text-orange-600">{formatFileSize(doc.size)}</div>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => handleDeleteDocument(doc.filename)}
-                    className="p-2 text-red-400 hover:bg-red-500/20 rounded-lg transition"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
+
+          {documentsExpanded && (
+            <div id="admin-documents-list">
+              {documents.length === 0 ? (
+                <div className="p-12 text-center">
+                  <FileText className="w-16 h-16 text-orange-300 mx-auto mb-4" />
+                  <p className="text-orange-600">No documents uploaded yet</p>
                 </div>
-              ))}
+              ) : (
+                <div className="divide-y divide-orange-200">
+                  {documents.map((doc) => (
+                    <div key={doc.filename} className="p-4 flex items-center justify-between hover:bg-orange-200 transition">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
+                          <FileText className="w-5 h-5 text-orange-600" />
+                        </div>
+                        <div>
+                          <div className="text-orange-900 font-medium">{doc.filename}</div>
+                          <div className="text-sm text-orange-600">{formatFileSize(doc.size)}</div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteDocument(doc.filename)}
+                        aria-label={`Delete ${doc.filename}`}
+                        className="p-2 text-red-400 hover:bg-red-500/20 rounded-lg transition"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -412,10 +473,19 @@ function AdminDashboard() {
         {/* User Management */}
         <div className="bg-beige-100 backdrop-blur-sm rounded-xl border border-orange-300 dashboard-card-beige">
           <div className="p-6 border-b border-orange-300 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-orange-900 flex items-center gap-2">
-              <Users className="w-5 h-5 text-orange-600" />
-              User Management ({users.length})
-            </h3>
+            <button
+              type="button"
+              onClick={() => setUsersExpanded(!usersExpanded)}
+              aria-expanded={usersExpanded}
+              aria-controls="admin-user-list"
+              className="flex items-center gap-2 text-left"
+            >
+              <span className="text-lg font-semibold text-orange-900 flex items-center gap-2">
+                <Users className="w-5 h-5 text-orange-600" />
+                User Management ({users.length})
+              </span>
+              <ChevronDown className={`w-5 h-5 text-orange-700 transition-transform ${usersExpanded ? 'rotate-180' : ''}`} />
+            </button>
             <button
               onClick={() => setShowUserModal(true)}
               className="px-4 py-2 text-white rounded-lg transition flex items-center gap-2 text-sm shadow-lg"
@@ -434,53 +504,58 @@ function AdminDashboard() {
               <button onClick={fetchUsers} className="ml-3 underline font-medium">Retry</button>
             </div>
           )}
-          
-          {users.length === 0 ? (
-            <div className="p-12 text-center">
-              <Users className="w-16 h-16 text-orange-300 mx-auto mb-4" />
-              <p className="text-orange-600">No users found</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-orange-200">
-              {users.map((userItem) => (
-                <div key={userItem.id} className="p-4 flex items-center justify-between hover:bg-orange-200 transition">
-                  <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
-                      <Users className="w-5 h-5 text-orange-600" />
-                    </div>
-                    <div>
-                      <div className="text-orange-900 font-medium">{userItem.name}</div>
-                      <div className="text-sm text-orange-600">{userItem.email}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      userItem.role === 'admin' 
-                        ? 'bg-orange-500/20 text-orange-600' 
-                        : 'bg-blue-500/20 text-blue-600'
-                    }`}>
-                      {userItem.role}
-                    </span>
-                    {userItem.role === 'admin' && (
-                      <span className={`px-2 py-1 rounded-full text-xs ${
-                        userItem.is_verified 
-                          ? 'bg-green-500/20 text-green-600' 
-                          : 'bg-yellow-500/20 text-yellow-600'
-                      }`}>
-                        {userItem.is_verified ? 'Verified' : 'Pending'}
-                      </span>
-                    )}
-                    {userItem.id !== currentUser.id && (
-                      <button
-                        onClick={() => handleDeleteUser(userItem.id)}
-                        className="p-2 text-red-400 hover:bg-red-500/20 rounded-lg transition"
-                      >
-                        <UserMinus className="w-5 h-5" />
-                      </button>
-                    )}
-                  </div>
+
+          {usersExpanded && (
+            <div id="admin-user-list">
+              {users.length === 0 ? (
+                <div className="p-12 text-center">
+                  <Users className="w-16 h-16 text-orange-300 mx-auto mb-4" />
+                  <p className="text-orange-600">No users found</p>
                 </div>
-              ))}
+              ) : (
+                <div className="divide-y divide-orange-200">
+                  {users.map((userItem) => (
+                    <div key={userItem.id} className="p-4 flex items-center justify-between hover:bg-orange-200 transition">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
+                          <Users className="w-5 h-5 text-orange-600" />
+                        </div>
+                        <div>
+                          <div className="text-orange-900 font-medium">{userItem.name}</div>
+                          <div className="text-sm text-orange-600">{userItem.email}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className={`px-2 py-1 rounded-full text-xs ${
+                          userItem.role === 'admin'
+                            ? 'bg-orange-500/20 text-orange-600'
+                            : 'bg-blue-500/20 text-blue-600'
+                        }`}>
+                          {userItem.role}
+                        </span>
+                        {userItem.role === 'admin' && (
+                          <span className={`px-2 py-1 rounded-full text-xs ${
+                            userItem.is_verified
+                              ? 'bg-green-500/20 text-green-600'
+                              : 'bg-yellow-500/20 text-yellow-600'
+                          }`}>
+                            {userItem.is_verified ? 'Verified' : 'Pending'}
+                          </span>
+                        )}
+                        {userItem.id !== currentUser.id && (
+                          <button
+                            onClick={() => handleDeleteUser(userItem.id)}
+                            aria-label={`Delete user ${userItem.email}`}
+                            className="p-2 text-red-400 hover:bg-red-500/20 rounded-lg transition"
+                          >
+                            <UserMinus className="w-5 h-5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
