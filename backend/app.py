@@ -1027,43 +1027,65 @@ async def create_user(user_data: UserCreate, current_user: User = Depends(requir
     """Create a new user (admin only)"""
     try:
         conn = get_db_connection()
-        
-        # Check if user already exists
-        existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (user_data.email,)).fetchone()
-        if existing_user:
-            conn.close()
-            raise HTTPException(status_code=400, detail="Email already registered")
-        
+
         # Hash password
         password_hash = hashlib.sha256(user_data.password.encode()).hexdigest()
-        
+
         # Generate verification token for admin users
         verification_token = None
         is_verified = True  # Auto-verify normal users
-        
+
         if user_data.role == 'admin':
             verification_token = secrets.token_urlsafe(32)
             is_verified = False  # Admins need verification
-        
-        # Insert new user
-        cursor = conn.execute(
-            'INSERT INTO users (email, name, password_hash, role, is_verified, verification_token) VALUES (?, ?, ?, ?, ?, ?)',
-            (user_data.email, user_data.name, password_hash, user_data.role, is_verified, verification_token)
-        )
-        conn.commit()
-        
-        # Get created user
-        user = conn.execute('SELECT * FROM users WHERE id = ?', (cursor.lastrowid,)).fetchone()
-        conn.close()
-        
-        response_data = {
-            "id": user['id'],
-            "email": user['email'],
-            "name": user['name'],
-            "role": user['role'],
-            "is_verified": user['is_verified'],
-            "created_at": user['created_at']
-        }
+
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            existing_user = conn.query(User_model).filter(User_model.email == user_data.email).first()
+            if existing_user:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Email already registered")
+
+            user = User_model(
+                email=user_data.email,
+                name=user_data.name,
+                password_hash=password_hash,
+                role=user_data.role,
+                is_verified=is_verified,
+                verification_token=verification_token,
+            )
+            conn.add(user)
+            conn.commit()
+            conn.refresh(user)
+            response_data = {
+                "id": user.id,
+                "email": user.email,
+                "name": user.name,
+                "role": user.role,
+                "is_verified": user.is_verified,
+                "created_at": user.created_at,
+            }
+            conn.close()
+        else:
+            existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (user_data.email,)).fetchone()
+            if existing_user:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Email already registered")
+
+            cursor = conn.execute(
+                'INSERT INTO users (email, name, password_hash, role, is_verified, verification_token) VALUES (?, ?, ?, ?, ?, ?)',
+                (user_data.email, user_data.name, password_hash, user_data.role, is_verified, verification_token)
+            )
+            conn.commit()
+            user = conn.execute('SELECT * FROM users WHERE id = ?', (cursor.lastrowid,)).fetchone()
+            conn.close()
+            response_data = {
+                "id": user['id'],
+                "email": user['email'],
+                "name": user['name'],
+                "role": user['role'],
+                "is_verified": user['is_verified'],
+                "created_at": user['created_at'],
+            }
         
         # Include verification token for admin users (for demo purposes)
         if user_data.role == 'admin' and verification_token:
