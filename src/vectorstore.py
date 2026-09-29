@@ -4,18 +4,13 @@ import hashlib
 import os
 from pathlib import Path
 from typing import List,Any
+from src.storage_paths import get_data_root
 
 class VectorStore:
     def __init__(self, collection_name:str="pdf_documents",persist_directory:str|None=None):
         self.collection_name=collection_name
         if persist_directory is None:
-            project_root = Path(__file__).resolve().parents[1]
-            # Check if running on Render (has mounted disk)
-            render_disk_path = os.getenv("RENDER_DISK_PATH", "/opt/render/project/data")
-            if os.path.exists(render_disk_path):
-                persist_directory = str(Path(render_disk_path) / "vector_store")
-            else:
-                persist_directory = str(project_root / "data" / "vector_store")
+            persist_directory = str(get_data_root() / "vector_store")
         self.persist_directory=persist_directory
         
         os.makedirs(self.persist_directory,exist_ok=True)

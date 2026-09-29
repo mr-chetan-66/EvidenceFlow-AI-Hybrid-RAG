@@ -38,6 +38,7 @@ from src.vectorstore import VectorStore
 from src.hybrid_retrieval import HybridRetriever
 from src.agentic_retrieval import AgenticRetrieval
 from src.cag_cache import CAGCache
+from src.storage_paths import get_pdf_directory
 
 app = FastAPI(title="EvidenceFlow AI", version="2.0.0")
 
@@ -87,6 +88,7 @@ cache = None
 system_ready = False
 rag_initialization_task = None
 rag_rebuild_lock = asyncio.Lock()
+background_indexing_task = None
 indexing_status_lock = threading.Lock()
 indexing_status = {
     "active": False,
@@ -104,6 +106,8 @@ def start_indexing_operation(operation):
     global indexing_status
     timestamp = datetime.now().strftime("%H:%M:%S")
     with indexing_status_lock:
+        if indexing_status["active"]:
+            return False
         indexing_status = {
             "active": True,
             "operation": operation,
@@ -114,6 +118,7 @@ def start_indexing_operation(operation):
             "updated_at": timestamp,
             "error": None,
         }
+    return True
 
 
 def report_indexing_progress(stage, message, progress):
@@ -131,11 +136,12 @@ def finish_indexing_operation(result=None, error=None):
     timestamp = datetime.now().strftime("%H:%M:%S")
     with indexing_status_lock:
         succeeded = error is None
-        message = (
-            f"Completed: {result['document_count']} documents, {result['chunk_count']} chunks"
-            if succeeded
-            else f"Failed: {error}"
-        )
+        if not succeeded:
+            message = f"Failed: {error}"
+        elif "cleared_vector_count" in result:
+            message = f"Cleared {result['cleared_vector_count']} vectors; source PDFs and accounts preserved"
+        else:
+            message = f"Completed: {result['document_count']} documents, {result['chunk_count']} chunks"
         indexing_status["active"] = False
         indexing_status["stage"] = "complete" if succeeded else "failed"
         indexing_status["progress"] = 100 if succeeded else indexing_status["progress"]
@@ -156,6 +162,8 @@ User_model = None
 
 # Database setup - supports both SQLite (local) and PostgreSQL (Render)
 DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
 
 def init_db():
     """Initialize database for users - supports SQLite and PostgreSQL"""
@@ -512,13 +520,7 @@ async def get_status(current_user: User = Depends(get_current_user)):
 @app.post("/initialize")
 async def initialize_system(current_user: User = Depends(require_admin)):
     """Initialize or recover the embedding and retrieval system from stored PDFs."""
-    try:
-        counts = await run_tracked_rebuild("reinitialize")
-        return {"message": "System reinitialized successfully", **counts}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    return schedule_indexing_operation("reinitialize")
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -947,7 +949,7 @@ async def list_documents(current_user: User = Depends(require_admin)):
     try:
         from pathlib import Path
         
-        pdf_dir = Path(__file__).resolve().parents[1] / "data" / "pdf"
+        pdf_dir = get_pdf_directory()
         
         documents = []
         if pdf_dir.exists():
@@ -971,7 +973,7 @@ async def delete_document(filename: str, current_user: User = Depends(require_ad
     try:
         from pathlib import Path
 
-        pdf_dir = Path(__file__).resolve().parents[1] / "data" / "pdf"
+        pdf_dir = get_pdf_directory()
         safe_filename = Path(filename).name
         if safe_filename != filename or Path(filename).suffix.lower() != ".pdf":
             raise HTTPException(status_code=400, detail="Invalid PDF filename")
@@ -990,9 +992,7 @@ def rebuild_document_index(operation="reindex"):
     global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
     from pathlib import Path
 
-    project_root = Path(__file__).resolve().parents[1]
-    pdf_dir = project_root / "data" / "pdf"
-    pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_dir = get_pdf_directory()
 
     report_indexing_progress("loading_pdfs", "Loading uploaded PDF documents", 12)
     all_documents = process_all_pdfs(str(pdf_dir))
@@ -1004,7 +1004,7 @@ def rebuild_document_index(operation="reindex"):
     all_chunks = chunk_documnents(all_documents)
     texts = [doc.page_content for doc in all_chunks]
 
-    if embedding_manager is None:
+    if operation == "reinitialize" or embedding_manager is None:
         report_indexing_progress("loading_model", "Loading the embedding model", 35)
         embedding_manager = EmbeddingManager()
     if vectorstore is None:
@@ -1016,7 +1016,23 @@ def rebuild_document_index(operation="reindex"):
         f"Generating embeddings for {len(texts)} chunks",
         55,
     )
-    embeddings = embedding_manager.genetate_embedding(texts) if texts else []
+    last_embedding_progress = 55
+
+    def report_embedding_batch(completed_batches, total_batches):
+        nonlocal last_embedding_progress
+        progress = 55 + int(20 * completed_batches / total_batches)
+        if progress >= last_embedding_progress + 2 or completed_batches == total_batches:
+            report_indexing_progress(
+                "generating_embeddings",
+                f"Embedded batch {completed_batches} of {total_batches}",
+                progress,
+            )
+            last_embedding_progress = progress
+
+    embeddings = (
+        embedding_manager.genetate_embedding(texts, progress_callback=report_embedding_batch)
+        if texts else []
+    )
     system_ready = False
     report_indexing_progress("rebuilding_vector_store", "Replacing the vector index", 76)
     vectorstore.client.delete_collection(name=vectorstore.collection_name)
@@ -1041,9 +1057,38 @@ def rebuild_document_index(operation="reindex"):
     if cache:
         cache.invalidate()
     cache = CAGCache(embedding_manager=embedding_manager)
-    system_ready = True
-    report_indexing_progress("ready", "Embedding system is ready", 98)
+    system_ready = bool(texts)
+    if system_ready:
+        report_indexing_progress("ready", "Embedding system is ready", 98)
+    else:
+        report_indexing_progress("no_documents", "No text chunks found; system remains not ready", 98)
     return {"document_count": len(all_documents), "chunk_count": len(all_chunks)}
+
+
+def clear_vector_index():
+    global vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
+    system_ready = False
+    report_indexing_progress("opening_vector_store", "Opening persistent vector storage", 25)
+    if vectorstore is None:
+        vectorstore = VectorStore()
+
+    existing_vectors = vectorstore.collection.count()
+    report_indexing_progress("clearing_vectors", f"Removing {existing_vectors} stored vectors", 60)
+    vectorstore.client.delete_collection(name=vectorstore.collection_name)
+    vectorstore.collection = vectorstore.client.get_or_create_collection(
+        name=vectorstore.collection_name,
+        metadata={"description": "PDF documents RAG vector"},
+    )
+    hybrid_retriever = None
+    agentic_retrieval = None
+    if cache:
+        cache.invalidate()
+    report_indexing_progress(
+        "vectors_cleared",
+        "Vector embeddings and retrieval cache cleared; source PDFs and accounts preserved",
+        95,
+    )
+    return {"document_count": 0, "chunk_count": 0, "cleared_vector_count": existing_vectors}
 
 
 async def wait_for_rag_initialization():
@@ -1053,17 +1098,26 @@ async def wait_for_rag_initialization():
 
 async def run_tracked_rebuild(operation):
     async with rag_rebuild_lock:
-        start_indexing_operation(operation)
         try:
             if rag_initialization_task is not None and not rag_initialization_task.done():
                 report_indexing_progress("waiting_for_startup", "Waiting for startup model initialization", 3)
             await wait_for_rag_initialization()
-            result = await asyncio.to_thread(rebuild_document_index, operation)
+            if operation == "clear_vectors":
+                result = await asyncio.to_thread(clear_vector_index)
+            else:
+                result = await asyncio.to_thread(rebuild_document_index, operation)
         except Exception as error:
             finish_indexing_operation(error=error)
-            raise
+            return
         finish_indexing_operation(result=result)
-        return result
+
+
+def schedule_indexing_operation(operation):
+    global background_indexing_task
+    if not start_indexing_operation(operation):
+        raise HTTPException(status_code=409, detail="An indexing operation is already running")
+    background_indexing_task = asyncio.create_task(run_tracked_rebuild(operation))
+    return {"accepted": True, "message": f"{operation} started", "operation": operation}
 
 
 @app.get("/admin/indexing-status")
@@ -1087,8 +1141,7 @@ async def upload_document(
     if not selected_files:
         raise HTTPException(status_code=400, detail="Select at least one PDF to upload")
 
-    pdf_dir = Path(__file__).resolve().parents[1] / "data" / "pdf"
-    pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_dir = get_pdf_directory()
     saved_filenames = []
     try:
         for uploaded_file in selected_files:
@@ -1097,29 +1150,27 @@ async def upload_document(
                 raise HTTPException(status_code=400, detail="Only PDF files can be uploaded")
             saved_filenames.append(filename)
 
-        async with rag_rebuild_lock:
-            start_indexing_operation("upload")
-            try:
-                if rag_initialization_task is not None and not rag_initialization_task.done():
-                    report_indexing_progress("waiting_for_startup", "Waiting for startup model initialization", 3)
-                await wait_for_rag_initialization()
-                for index, (uploaded_file, filename) in enumerate(zip(selected_files, saved_filenames)):
-                    report_indexing_progress(
-                        "saving_uploads",
-                        f"Saving {filename}",
-                        5 + int(8 * (index + 1) / len(selected_files)),
-                    )
-                    with (pdf_dir / filename).open("wb") as buffer:
-                        shutil.copyfileobj(uploaded_file.file, buffer)
-                counts = await asyncio.to_thread(rebuild_document_index, "upload")
-            except Exception as error:
-                finish_indexing_operation(error=error)
-                raise
-            finish_indexing_operation(result=counts)
+        if not start_indexing_operation("upload"):
+            raise HTTPException(status_code=409, detail="An indexing operation is already running")
+        try:
+            for index, (uploaded_file, filename) in enumerate(zip(selected_files, saved_filenames)):
+                report_indexing_progress(
+                    "saving_uploads",
+                    f"Saving {filename}",
+                    5 + int(8 * (index + 1) / len(selected_files)),
+                )
+                with (pdf_dir / filename).open("wb") as buffer:
+                    shutil.copyfileobj(uploaded_file.file, buffer)
+        except Exception as error:
+            finish_indexing_operation(error=error)
+            raise
+        global background_indexing_task
+        background_indexing_task = asyncio.create_task(run_tracked_rebuild("upload"))
         return {
-            "message": "Selected documents uploaded and embedded successfully",
+            "accepted": True,
+            "message": "Documents saved; embedding job started",
             "uploaded_files": saved_filenames,
-            **counts,
+            "operation": "upload",
         }
     except HTTPException:
         raise
@@ -1287,18 +1338,31 @@ async def verify_email(token: str):
     try:
         conn = get_db_connection()
         
-        # Find user with verification token
-        user = conn.execute('SELECT * FROM users WHERE verification_token = ?', (token,)).fetchone()
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            from sqlalchemy import text
+            user = conn.execute(
+                text('SELECT * FROM users WHERE verification_token = :token'),
+                {'token': token},
+            ).mappings().first()
+        else:
+            user = conn.execute(
+                'SELECT * FROM users WHERE verification_token = ?', (token,)
+            ).fetchone()
         
         if not user:
             conn.close()
             raise HTTPException(status_code=404, detail="Invalid or expired verification token")
         
-        # Update user as verified
-        conn.execute(
-            'UPDATE users SET is_verified = 1, verification_token = NULL WHERE id = ?',
-            (user['id'],)
-        )
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            conn.execute(
+                text('UPDATE users SET is_verified = TRUE, verification_token = NULL WHERE id = :user_id'),
+                {'user_id': user['id']},
+            )
+        else:
+            conn.execute(
+                'UPDATE users SET is_verified = 1, verification_token = NULL WHERE id = ?',
+                (user['id'],)
+            )
         conn.commit()
         conn.close()
         
@@ -1315,13 +1379,13 @@ async def verify_email(token: str):
 @app.post("/admin/reindex")
 async def reindex_documents(current_user: User = Depends(require_admin)):
     """Reindex all documents (clear and rebuild vector store)"""
-    try:
-        counts = await run_tracked_rebuild("reindex")
-        return {"message": "Documents reindexed successfully", **counts}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    return schedule_indexing_operation("reindex")
+
+
+@app.post("/admin/clear-vector-data")
+async def clear_vector_data(current_user: User = Depends(require_admin)):
+    """Clear embeddings and vector index while preserving PDFs and user accounts."""
+    return schedule_indexing_operation("clear_vectors")
 
 
 if __name__ == "__main__":

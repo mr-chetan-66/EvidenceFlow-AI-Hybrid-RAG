@@ -30,6 +30,7 @@ function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [reindexing, setReindexing] = useState(false);
   const [reinitializing, setReinitializing] = useState(false);
+  const [clearingVectors, setClearingVectors] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [indexingStatus, setIndexingStatus] = useState(null);
   const [documentsExpanded, setDocumentsExpanded] = useState(false);
@@ -44,11 +45,12 @@ function AdminDashboard() {
     role: 'user'
   });
   const [createdUserInfo, setCreatedUserInfo] = useState(null);
+  const lastTerminalStatusRef = React.useRef(null);
   const [theme, setTheme] = useState(() => loadPreferences().theme);
   const navigate = useNavigate();
 
   const currentUser = JSON.parse(localStorage.getItem('user') || '{}');
-  const indexingActionInProgress = uploading || reindexing || reinitializing;
+  const indexingActionInProgress = Boolean(indexingStatus?.active) || uploading || reindexing || reinitializing || clearingVectors;
 
   const fetchIndexingStatus = async () => {
     try {
@@ -113,6 +115,15 @@ function AdminDashboard() {
     }
   };
 
+  useEffect(() => {
+    if (!indexingStatus || indexingStatus.active || !['complete', 'failed'].includes(indexingStatus.stage)) return;
+    if (lastTerminalStatusRef.current === indexingStatus.updated_at) return;
+
+    lastTerminalStatusRef.current = indexingStatus.updated_at;
+    fetchDocuments();
+    fetchSystemStatus();
+  }, [indexingStatus]);
+
   const handleDeleteDocument = async (filename) => {
     if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
 
@@ -130,8 +141,8 @@ function AdminDashboard() {
     setReindexing(true);
     try {
       const response = await api.post('/admin/reindex');
-      alert(`Reindex completed: ${response.data.document_count} documents, ${response.data.chunk_count} chunks`);
-      await Promise.all([fetchDocuments(), fetchSystemStatus()]);
+      setIndexingStatus(await api.get('/admin/indexing-status').then((status) => status.data));
+      if (response.data.accepted) alert('Reindex started. Follow progress in the Process Console.');
     } catch (error) {
       alert('Reindex failed: ' + (error.response?.data?.detail || error.message));
     } finally {
@@ -145,12 +156,27 @@ function AdminDashboard() {
     setReinitializing(true);
     try {
       const response = await api.post('/initialize');
-      alert(`System reinitialized: ${response.data.document_count} documents, ${response.data.chunk_count} chunks`);
-      await Promise.all([fetchDocuments(), fetchSystemStatus()]);
+      setIndexingStatus(await api.get('/admin/indexing-status').then((status) => status.data));
+      if (response.data.accepted) alert('System reinitialization started. Follow progress in the Process Console.');
     } catch (error) {
       alert('System reinitialization failed: ' + (error.response?.data?.detail || error.message));
     } finally {
       setReinitializing(false);
+    }
+  };
+
+  const handleClearVectorData = async () => {
+    if (!confirm('Remove all embeddings and vectors from the search index? Uploaded PDFs and PostgreSQL user accounts will be preserved.')) return;
+
+    setClearingVectors(true);
+    try {
+      const response = await api.post('/admin/clear-vector-data');
+      setIndexingStatus(await api.get('/admin/indexing-status').then((status) => status.data));
+      if (response.data.accepted) alert('Vector index clearing started. Follow progress in the Process Console.');
+    } catch (error) {
+      alert('Could not clear vector data: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setClearingVectors(false);
     }
   };
 
@@ -163,9 +189,9 @@ function AdminDashboard() {
       selectedFiles.forEach((file) => formData.append('files', file));
 
       const response = await api.post('/admin/upload', formData);
-      alert(`Uploaded and embedded ${response.data.uploaded_files.length} file(s): ${response.data.chunk_count} chunks`);
       setSelectedFiles([]);
-      await Promise.all([fetchDocuments(), fetchSystemStatus()]);
+      setIndexingStatus(await api.get('/admin/indexing-status').then((status) => status.data));
+      if (response.data.accepted) alert(`Saved ${response.data.uploaded_files.length} file(s). Embedding started; follow progress in the Process Console.`);
     } catch (error) {
       alert('File upload failed: ' + (error.response?.data?.detail || error.message));
     } finally {
@@ -347,7 +373,7 @@ function AdminDashboard() {
                 accept=".pdf"
                 multiple
                 onChange={(e) => setSelectedFiles(Array.from(e.target.files || []))}
-                disabled={uploading}
+                disabled={indexingActionInProgress}
                 className="flex-1 text-sm text-orange-700"
               />
             </div>
@@ -363,7 +389,7 @@ function AdminDashboard() {
               className="mt-4 px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
               style={{background: '#f74b03'}}
             >
-              {uploading ? (
+              {uploading || (indexingStatus?.active && indexingStatus.operation === 'upload') ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   Uploading and embedding...
@@ -383,7 +409,7 @@ function AdminDashboard() {
               Reindex System
             </h3>
             <p className="text-sm text-orange-700 mb-4">
-              Clear all data and rebuild the search index from uploaded documents
+              Rebuild embeddings and the search index from uploaded PDFs. Accounts and source files are preserved.
             </p>
             <button
               onClick={handleReindex}
@@ -393,7 +419,7 @@ function AdminDashboard() {
               onMouseEnter={(e) => e.target.style.background = '#cc3c02'}
               onMouseLeave={(e) => e.target.style.background = '#f74b03'}
             >
-              {reindexing ? (
+              {reindexing || (indexingStatus?.active && indexingStatus.operation === 'reindex') ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   Reindexing...
@@ -421,7 +447,7 @@ function AdminDashboard() {
               className="px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
               style={{background: '#f74b03'}}
             >
-              {reinitializing ? (
+              {reinitializing || (indexingStatus?.active && indexingStatus.operation === 'reinitialize') ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   Reinitializing...
@@ -430,6 +456,24 @@ function AdminDashboard() {
                 <>
                   <Database className="w-4 h-4" />
                   Reinitialize System
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleClearVectorData}
+              disabled={indexingActionInProgress}
+              className="mt-3 px-4 py-2 rounded-lg border border-red-400 text-red-700 hover:bg-red-100 transition disabled:opacity-50 flex items-center gap-2"
+            >
+              {clearingVectors || (indexingStatus?.active && indexingStatus.operation === 'clear_vectors') ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-red-300 border-t-red-700 rounded-full animate-spin" />
+                  Clearing vector index...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="w-4 h-4" />
+                  Clear Vector Index
                 </>
               )}
             </button>
