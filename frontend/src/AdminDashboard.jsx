@@ -29,6 +29,8 @@ function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [reindexing, setReindexing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [userLoadError, setUserLoadError] = useState('');
   const [showUserModal, setShowUserModal] = useState(false);
   const [userFormData, setUserFormData] = useState({
     email: '',
@@ -78,9 +80,13 @@ function AdminDashboard() {
   const fetchUsers = async () => {
     try {
       const response = await api.get('/admin/users');
-      setUsers(response.data.users);
+      setUsers(response.data.users || []);
+      setUserLoadError('');
+      return true;
     } catch (error) {
       console.error('Failed to fetch users:', error);
+      setUserLoadError(error.response?.data?.detail || 'Could not load users. Check the backend connection and try again.');
+      return false;
     }
   };
 
@@ -102,7 +108,7 @@ function AdminDashboard() {
     try {
       const response = await api.post('/admin/reindex');
       alert(`Reindex completed: ${response.data.document_count} documents, ${response.data.chunk_count} chunks`);
-      fetchSystemStatus();
+      await Promise.all([fetchDocuments(), fetchSystemStatus()]);
     } catch (error) {
       alert('Reindex failed');
     } finally {
@@ -110,24 +116,20 @@ function AdminDashboard() {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  const handleFileUpload = async () => {
+    if (!selectedFiles.length) return;
 
     setUploading(true);
     try {
       const formData = new FormData();
-      formData.append('file', file);
+      selectedFiles.forEach((file) => formData.append('files', file));
 
-      await api.post('/admin/upload', formData, {
-        headers: { 
-          'Content-Type': 'multipart/form-data'
-        }
-      });
-      alert('File uploaded successfully');
-      fetchDocuments();
+      const response = await api.post('/admin/upload', formData);
+      alert(`Uploaded and embedded ${response.data.uploaded_files.length} file(s): ${response.data.chunk_count} chunks`);
+      setSelectedFiles([]);
+      await Promise.all([fetchDocuments(), fetchSystemStatus()]);
     } catch (error) {
-      alert('File upload failed');
+      alert('File upload failed: ' + (error.response?.data?.detail || error.message));
     } finally {
       setUploading(false);
     }
@@ -151,7 +153,7 @@ function AdminDashboard() {
       const response = await api.post('/admin/users', userFormData);
       setShowUserModal(false);
       setUserFormData({ email: '', name: '', password: '', role: 'user' });
-      fetchUsers();
+      await fetchUsers();
       
       // Show verification info for admin users
       if (userFormData.role === 'admin') {
@@ -308,14 +310,36 @@ function AdminDashboard() {
               <input
                 type="file"
                 accept=".pdf"
-                onChange={handleFileUpload}
+                multiple
+                onChange={(e) => setSelectedFiles(Array.from(e.target.files || []))}
                 disabled={uploading}
                 className="flex-1 text-sm text-orange-700"
               />
-              {uploading && (
-                <div className="w-5 h-5 border-2 border-orange-400 border-t-transparent rounded-full animate-spin" />
-              )}
             </div>
+            {selectedFiles.length > 0 && (
+              <div className="mt-3 text-sm text-orange-700" aria-live="polite">
+                {selectedFiles.length} selected: {selectedFiles.map((file) => file.name).join(', ')}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleFileUpload}
+              disabled={uploading || selectedFiles.length === 0}
+              className="mt-4 px-4 py-2 text-white rounded-lg transition disabled:opacity-50 flex items-center gap-2"
+              style={{background: '#f74b03'}}
+            >
+              {uploading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Uploading and embedding...
+                </>
+              ) : (
+                <>
+                  <Upload className="w-4 h-4" />
+                  Upload and Embed Selected
+                </>
+              )}
+            </button>
           </div>
 
           <div className="bg-beige-100 backdrop-blur-sm rounded-xl p-6 border border-orange-300">
@@ -365,8 +389,8 @@ function AdminDashboard() {
             </div>
           ) : (
             <div className="divide-y divide-orange-200">
-              {documents.map((doc, index) => (
-                <div key={index} className="p-4 flex items-center justify-between hover:bg-orange-200 transition">
+              {documents.map((doc) => (
+                <div key={doc.filename} className="p-4 flex items-center justify-between hover:bg-orange-200 transition">
                   <div className="flex items-center gap-4">
                     <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
                       <FileText className="w-5 h-5 text-orange-600" />
@@ -406,6 +430,13 @@ function AdminDashboard() {
               Add User
             </button>
           </div>
+
+          {userLoadError && (
+            <div className="px-6 py-3 text-sm text-red-700 bg-red-100 border-b border-red-200" role="alert">
+              {userLoadError}
+              <button onClick={fetchUsers} className="ml-3 underline font-medium">Retry</button>
+            </div>
+          )}
           
           {users.length === 0 ? (
             <div className="p-12 text-center">

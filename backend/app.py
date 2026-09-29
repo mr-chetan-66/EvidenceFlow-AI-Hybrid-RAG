@@ -301,6 +301,11 @@ class UserLogin(BaseModel):
     password: str
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -683,6 +688,53 @@ async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user info"""
     return current_user
 
+
+@app.post("/auth/change-password")
+async def change_password(password_data: PasswordChange, current_user: User = Depends(get_current_user)):
+    """Change the authenticated user's password"""
+    if len(password_data.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    conn = get_db_connection()
+    try:
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            from sqlalchemy import text
+
+            result = conn.execute(
+                text("SELECT password_hash FROM users WHERE id = :user_id"),
+                {"user_id": current_user.id},
+            ).fetchone()
+            password_hash = result.password_hash if result else None
+        else:
+            result = conn.execute(
+                "SELECT password_hash FROM users WHERE id = ?",
+                (current_user.id,),
+            ).fetchone()
+            password_hash = result["password_hash"] if result else None
+
+        if password_hash != hashlib.sha256(password_data.current_password.encode()).hexdigest():
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+        new_password_hash = hashlib.sha256(password_data.new_password.encode()).hexdigest()
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            conn.execute(
+                text("UPDATE users SET password_hash = :password_hash WHERE id = :user_id"),
+                {"password_hash": new_password_hash, "user_id": current_user.id},
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (new_password_hash, current_user.id),
+            )
+        conn.commit()
+        return {"message": "Password changed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
 @app.post("/auth/logout")
 async def logout(current_user: User = Depends(get_current_user)):
     """Logout user and invalidate token"""
@@ -888,12 +940,9 @@ async def google_callback(request: Request):
 async def list_documents(current_user: User = Depends(require_admin)):
     """List all documents in the system"""
     try:
-        import os
         from pathlib import Path
         
-        pdf_dir = Path("../data/pdf")
-        if not pdf_dir.exists():
-            pdf_dir = Path("data/pdf")
+        pdf_dir = Path(__file__).resolve().parents[1] / "data" / "pdf"
         
         documents = []
         if pdf_dir.exists():
@@ -914,12 +963,13 @@ async def delete_document(filename: str, current_user: User = Depends(require_ad
     """Delete a document"""
     try:
         from pathlib import Path
-        
-        pdf_dir = Path("../data/pdf")
-        if not pdf_dir.exists():
-            pdf_dir = Path("data/pdf")
-        
-        file_path = pdf_dir / filename
+
+        pdf_dir = Path(__file__).resolve().parents[1] / "data" / "pdf"
+        safe_filename = Path(filename).name
+        if safe_filename != filename or Path(filename).suffix.lower() != ".pdf":
+            raise HTTPException(status_code=400, detail="Invalid PDF filename")
+
+        file_path = pdf_dir / safe_filename
         if file_path.exists():
             file_path.unlink()
             return {"message": f"Document {filename} deleted successfully"}
@@ -928,70 +978,85 @@ async def delete_document(filename: str, current_user: User = Depends(require_ad
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/admin/upload")
-async def upload_document(file: UploadFile = File(...), current_user: User = Depends(require_admin)):
-    """Upload a PDF document and trigger auto-embedding"""
+def rebuild_document_index():
+    """Rebuild retrieval state from PDFs in the project's persistent data directory."""
     global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
-    
-    try:
-        # Save uploaded file
-        from pathlib import Path
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        pdf_dir = Path(project_root) / "data" / "pdf"
-        pdf_dir.mkdir(parents=True, exist_ok=True)
-        
-        file_path = pdf_dir / file.filename
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Process the uploaded document and update embeddings
-        print(f"Processing uploaded file: {file.filename}")
-        
-        # Load all documents including the new one
-        os.chdir(project_root)
-        all_documents = process_all_pdfs("./data/pdf")
-        
-        if len(all_documents) > 500:
-            all_documents = all_documents[:500]
-        
-        # Chunk documents
-        all_chunks = chunk_documnents(all_documents)
-        
-        # Generate embeddings
-        texts = [doc.page_content for doc in all_chunks]
-        embeddings = embedding_manager.genetate_embedding(texts)
-        
-        # Clear and rebuild vector store
-        vectorstore_path = Path(project_root) / "data" / "vector_store"
-        if vectorstore_path.exists():
-            shutil.rmtree(vectorstore_path)
-        
+    from pathlib import Path
+
+    system_ready = False
+    project_root = Path(__file__).resolve().parents[1]
+    pdf_dir = project_root / "data" / "pdf"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+
+    all_documents = process_all_pdfs(str(pdf_dir))
+    all_chunks = chunk_documnents(all_documents)
+    texts = [doc.page_content for doc in all_chunks]
+
+    if embedding_manager is None:
+        embedding_manager = EmbeddingManager()
+    if vectorstore is None:
         vectorstore = VectorStore()
+    vectorstore.client.delete_collection(name=vectorstore.collection_name)
+    vectorstore.collection = vectorstore.client.get_or_create_collection(
+        name=vectorstore.collection_name,
+        metadata={"description": "PDF documents RAG vector"},
+    )
+
+    if texts:
+        embeddings = embedding_manager.genetate_embedding(texts)
         vectorstore.add_documents(all_chunks, embeddings)
-        
-        # Reinitialize retrievers
-        hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
+
+    hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
+    if texts:
         hybrid_retriever.index_documents(texts)
-        agentic_retrieval = AgenticRetrieval(
-            hybrid_retriever,
-            max_iterations=2,
-            enable_reranking=True,
-            enable_citation_check=False
-        )
-        
-        # Clear cache as documents have changed
-        if cache:
-            cache.invalidate()
-        cache = CAGCache(embedding_manager=embedding_manager)
-        
-        system_ready = True
-        
+    agentic_retrieval = AgenticRetrieval(
+        hybrid_retriever,
+        max_iterations=2,
+        enable_reranking=True,
+        enable_citation_check=False,
+    )
+    if cache:
+        cache.invalidate()
+    cache = CAGCache(embedding_manager=embedding_manager)
+    system_ready = True
+    return {"document_count": len(all_documents), "chunk_count": len(all_chunks)}
+
+
+@app.post("/admin/upload")
+async def upload_document(
+    files: Optional[List[UploadFile]] = File(None),
+    file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(require_admin),
+):
+    """Save selected PDFs and rebuild embeddings once for the complete collection."""
+    from pathlib import Path
+
+    selected_files = list(files or [])
+    if file is not None:
+        selected_files.append(file)
+    if not selected_files:
+        raise HTTPException(status_code=400, detail="Select at least one PDF to upload")
+
+    pdf_dir = Path(__file__).resolve().parents[1] / "data" / "pdf"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    saved_filenames = []
+    try:
+        for uploaded_file in selected_files:
+            filename = Path(uploaded_file.filename or "").name
+            if not filename or Path(filename).suffix.lower() != ".pdf":
+                raise HTTPException(status_code=400, detail="Only PDF files can be uploaded")
+            with (pdf_dir / filename).open("wb") as buffer:
+                shutil.copyfileobj(uploaded_file.file, buffer)
+            saved_filenames.append(filename)
+
+        counts = rebuild_document_index()
         return {
-            "message": f"Document {file.filename} uploaded and processed successfully",
-            "document_count": len(all_documents),
-            "chunk_count": len(all_chunks)
+            "message": "Selected documents uploaded and embedded successfully",
+            "uploaded_files": saved_filenames,
+            **counts,
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1002,7 +1067,15 @@ async def list_users(current_user: User = Depends(require_admin)):
     """List all users (admin only)"""
     try:
         conn = get_db_connection()
-        users = conn.execute('SELECT id, email, name, role, is_verified, created_at FROM users').fetchall()
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            from sqlalchemy import text
+            users = conn.execute(text(
+                'SELECT id, email, name, role, is_verified, created_at FROM users ORDER BY id'
+            )).mappings().all()
+        else:
+            users = conn.execute(
+                'SELECT id, email, name, role, is_verified, created_at FROM users ORDER BY id'
+            ).fetchall()
         conn.close()
         
         return {
@@ -1104,21 +1177,35 @@ async def delete_user(user_id: int, current_user: User = Depends(require_admin))
     try:
         conn = get_db_connection()
         
-        # Check if user exists
-        user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            from sqlalchemy import text
+            user = conn.execute(
+                text('SELECT * FROM users WHERE id = :user_id'), {'user_id': user_id}
+            ).mappings().first()
+        else:
+            user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
         if not user:
             conn.close()
             raise HTTPException(status_code=404, detail="User not found")
         
         # Prevent deleting the last admin
         if user['role'] == 'admin':
-            admin_count = conn.execute('SELECT COUNT(*) as count FROM users WHERE role = "admin"').fetchone()['count']
+            if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+                admin_count = conn.execute(
+                    text('SELECT COUNT(*) FROM users WHERE role = :role'), {'role': 'admin'}
+                ).scalar_one()
+            else:
+                admin_count = conn.execute('SELECT COUNT(*) as count FROM users WHERE role = "admin"').fetchone()['count']
             if admin_count <= 1:
                 conn.close()
                 raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
         
         # Delete user
-        conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        if DATABASE_URL and DATABASE_URL.startswith("postgres"):
+            from sqlalchemy import text
+            conn.execute(text('DELETE FROM users WHERE id = :user_id'), {'user_id': user_id})
+        else:
+            conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
         conn.commit()
         conn.close()
         
@@ -1162,64 +1249,9 @@ async def verify_email(token: str):
 @app.post("/admin/reindex")
 async def reindex_documents(current_user: User = Depends(require_admin)):
     """Reindex all documents (clear and rebuild vector store)"""
-    global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
-    
     try:
-        # Clear existing data
-        system_ready = False
-        
-        # Delete vector store
-        vectorstore_path = Path("../data/vector_store")
-        if not vectorstore_path.exists():
-            vectorstore_path = Path("data/vector_store")
-        
-        if vectorstore_path.exists():
-            shutil.rmtree(vectorstore_path)
-        
-        # Clear cache
-        if cache:
-            cache.invalidate()
-        
-        # Reinitialize components
-        vectorstore = VectorStore()
-        embedding_manager = EmbeddingManager()
-        
-        # Load and process documents
-        import os
-        os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        
-        all_documents = process_all_pdfs("./data/pdf")
-        if len(all_documents) > 500:
-            all_documents = all_documents[:500]
-        
-        all_chunks = chunk_documnents(all_documents)
-        
-        # Generate embeddings
-        texts = [doc.page_content for doc in all_chunks]
-        embeddings = embedding_manager.genetate_embedding(texts)
-        
-        # Store in vector store
-        vectorstore.add_documents(all_chunks, embeddings)
-        
-        # Initialize retrievers
-        hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-        hybrid_retriever.index_documents(texts)
-        agentic_retrieval = AgenticRetrieval(
-            hybrid_retriever,
-            max_iterations=2,
-            enable_reranking=True,
-            enable_citation_check=False
-        )
-        cache = CAGCache(embedding_manager=embedding_manager)
-        
-        system_ready = True
-        
-        return {
-            "message": "Documents reindexed successfully",
-            "document_count": len(all_documents),
-            "chunk_count": len(all_chunks)
-        }
-        
+        counts = rebuild_document_index()
+        return {"message": "Documents reindexed successfully", **counts}
     except Exception as e:
         import traceback
         traceback.print_exc()

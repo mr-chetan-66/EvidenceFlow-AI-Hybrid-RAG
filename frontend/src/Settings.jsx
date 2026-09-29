@@ -12,6 +12,8 @@ function Settings() {
   const [notifications, setNotifications] = useState(savedPreferences.notifications);
   const [autoSave, setAutoSave] = useState(savedPreferences.autoSaveChats);
   const [saving, setSaving] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current_password: '', new_password: '', confirm_password: '' });
+  const [changingPassword, setChangingPassword] = useState(false);
 
   useEffect(() => {
     applyThemePreference(theme);
@@ -35,6 +37,28 @@ function Settings() {
       setSaving(false);
       alert('Settings saved successfully!');
     }, 1000);
+  };
+
+  const handlePasswordChange = async (event) => {
+    event.preventDefault();
+    if (passwordForm.new_password !== passwordForm.confirm_password) {
+      alert('New passwords do not match');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      await api.post('/auth/change-password', {
+        current_password: passwordForm.current_password,
+        new_password: passwordForm.new_password
+      });
+      setPasswordForm({ current_password: '', new_password: '', confirm_password: '' });
+      alert('Password changed successfully');
+    } catch (error) {
+      alert(error.response?.data?.detail || 'Failed to change password');
+    } finally {
+      setChangingPassword(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -215,6 +239,61 @@ function Settings() {
           </h3>
           
           <div className="space-y-4">
+            <form onSubmit={handlePasswordChange} className="space-y-4 border-b border-orange-200 pb-5">
+              <div>
+                <label className="block text-sm font-medium text-orange-900 mb-2" htmlFor="current-password">
+                  Current password
+                </label>
+                <input
+                  id="current-password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={passwordForm.current_password}
+                  onChange={(event) => setPasswordForm({ ...passwordForm, current_password: event.target.value })}
+                  className="w-full bg-white border border-orange-300 rounded-lg py-3 px-4 text-orange-900 focus:outline-none focus:border-orange-500 transition"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-orange-900 mb-2" htmlFor="new-password">
+                  New password
+                </label>
+                <input
+                  id="new-password"
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  value={passwordForm.new_password}
+                  onChange={(event) => setPasswordForm({ ...passwordForm, new_password: event.target.value })}
+                  className="w-full bg-white border border-orange-300 rounded-lg py-3 px-4 text-orange-900 focus:outline-none focus:border-orange-500 transition"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-orange-900 mb-2" htmlFor="confirm-password">
+                  Confirm new password
+                </label>
+                <input
+                  id="confirm-password"
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  value={passwordForm.confirm_password}
+                  onChange={(event) => setPasswordForm({ ...passwordForm, confirm_password: event.target.value })}
+                  className="w-full bg-white border border-orange-300 rounded-lg py-3 px-4 text-orange-900 focus:outline-none focus:border-orange-500 transition"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={changingPassword}
+                className="px-4 py-3 text-white rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-2"
+                style={{background: '#f74b03'}}
+              >
+                <Lock className="w-4 h-4" />
+                {changingPassword ? 'Changing password...' : 'Change Password'}
+              </button>
+            </form>
             <button
               onClick={handleLogout}
               className="w-full px-4 py-3 bg-orange-200 text-orange-800 border border-orange-300 rounded-lg hover:bg-orange-300 transition flex items-center justify-center gap-2"
