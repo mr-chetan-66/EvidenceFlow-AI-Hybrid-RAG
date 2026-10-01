@@ -15,21 +15,26 @@ def process_all_pdfs(pdf_directory):
     for pdf_file in pdf_files:
         print(f"Processing: {pdf_file}")
         try:
-            documents = PyMuPDFLoader(str(pdf_file)).load()
-            print(f"  Loaded {len(documents)} pages from {pdf_file.name}")
-            for doc in documents:
-                # Preserve existing metadata including page number
-                doc.metadata.update({
-                    "source": str(pdf_file),
-                    "file_type": "pdf",
-                    "page": doc.metadata.get("page", 0)  # Preserve page number
-                })
-            all_documents.extend(documents)
+            all_documents.extend(process_pdf(pdf_file))
         except Exception as e:
             print(f"  ✗ Error loading {pdf_file.name}: {e}")
 
     print(f"\nTotal documents loaded: {len(all_documents)}")
     return all_documents
+
+
+def process_pdf(pdf_path):
+    """Load one PDF and preserve the source and page metadata used by retrieval."""
+    pdf_file = Path(pdf_path)
+    documents = PyMuPDFLoader(str(pdf_file)).load()
+    print(f"  Loaded {len(documents)} pages from {pdf_file.name}")
+    for doc in documents:
+        doc.metadata.update({
+            "source": str(pdf_file),
+            "file_type": "pdf",
+            "page": doc.metadata.get("page", 0),
+        })
+    return documents
 
 def chunk_documnents(documents, chunk_size=300, chunk_overlap=50):
     """Ultra-optimized chunking with very small chunks for maximum speed"""

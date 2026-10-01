@@ -33,8 +33,9 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.load_and_chunk import process_all_pdfs, chunk_documnents
+from src.load_and_chunk import process_all_pdfs, process_pdf, chunk_documnents
 from src.embedding import EmbeddingManager
+from src.document_indexing import index_uploaded_chunks
 from src.vectorstore import VectorStore
 from src.hybrid_retrieval import HybridRetriever
 from src.agentic_retrieval import AgenticRetrieval
@@ -1075,6 +1076,90 @@ def rebuild_document_index(operation="reindex"):
     return {"document_count": len(all_documents), "chunk_count": len(all_chunks)}
 
 
+def index_uploaded_documents(filenames):
+    """Index only uploaded PDFs, then refresh BM25 from the persistent corpus."""
+    global embedding_manager, vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
+
+    pdf_dir = get_pdf_directory()
+    if embedding_manager is None:
+        report_indexing_progress("loading_model", "Loading the embedding model", 20)
+        embedding_manager = EmbeddingManager()
+    if vectorstore is None:
+        report_indexing_progress("opening_vector_store", "Opening the vector store", 25)
+        vectorstore = VectorStore()
+
+    uploaded_documents = []
+    documents_by_filename = {}
+    for filename in dict.fromkeys(filenames):
+        pdf_path = pdf_dir / filename
+        if not pdf_path.is_file():
+            raise FileNotFoundError(f"Uploaded PDF not found: {filename}")
+        report_indexing_progress(
+            "loading_uploaded_pdfs",
+            f"Loading uploaded PDF {filename}",
+            10,
+        )
+        documents = process_pdf(pdf_path)
+        documents_by_filename[filename] = documents
+        uploaded_documents.extend(documents)
+
+    report_indexing_progress(
+        "chunking_documents",
+        f"Loaded {len(uploaded_documents)} pages; splitting uploaded files into chunks",
+        25,
+    )
+    chunks = []
+    for filename, documents in documents_by_filename.items():
+        file_chunks = chunk_documnents(documents)
+        if not file_chunks:
+            raise ValueError(f"No text chunks could be extracted from {filename}")
+        chunks.extend(file_chunks)
+
+    last_embedding_progress = 40
+
+    def report_embedding_batch(completed_batches, total_batches):
+        nonlocal last_embedding_progress
+        progress = 40 + int(35 * completed_batches / total_batches)
+        if progress >= last_embedding_progress + 2 or completed_batches == total_batches:
+            report_indexing_progress(
+                "generating_embeddings",
+                f"Embedded uploaded batch {completed_batches} of {total_batches}",
+                progress,
+            )
+            last_embedding_progress = progress
+
+    report_indexing_progress(
+        "generating_embeddings",
+        f"Generating embeddings for {len(chunks)} uploaded chunks",
+        40,
+    )
+    if cache:
+        cache.invalidate()
+    index_uploaded_chunks(
+        chunks,
+        embedding_manager,
+        vectorstore,
+        progress_callback=report_embedding_batch,
+    )
+
+    report_indexing_progress("building_retriever", "Refreshing keyword retrieval", 82)
+    documents, metadatas, document_ids = vectorstore.get_all_documents()
+    updated_retriever = HybridRetriever(embedding_manager, vectorstore)
+    updated_retriever.index_documents(documents, metadatas, document_ids)
+    updated_agentic_retrieval = AgenticRetrieval(
+        updated_retriever,
+        max_iterations=2,
+        enable_reranking=True,
+        enable_citation_check=False,
+    )
+    hybrid_retriever = updated_retriever
+    agentic_retrieval = updated_agentic_retrieval
+    cache = CAGCache(embedding_manager=embedding_manager)
+    system_ready = updated_retriever.is_ready()
+    report_indexing_progress("ready", "Uploaded documents indexed", 98)
+    return {"document_count": len(uploaded_documents), "chunk_count": len(chunks)}
+
+
 def clear_vector_index():
     global vectorstore, hybrid_retriever, agentic_retrieval, cache, system_ready
     system_ready = False
@@ -1106,7 +1191,7 @@ async def wait_for_rag_initialization():
         await rag_initialization_task
 
 
-async def run_tracked_rebuild(operation):
+async def run_tracked_rebuild(operation, uploaded_filenames=None):
     async with rag_rebuild_lock:
         try:
             if rag_initialization_task is not None and not rag_initialization_task.done():
@@ -1114,6 +1199,8 @@ async def run_tracked_rebuild(operation):
             await wait_for_rag_initialization()
             if operation == "clear_vectors":
                 result = await asyncio.to_thread(clear_vector_index)
+            elif operation == "upload":
+                result = await asyncio.to_thread(index_uploaded_documents, uploaded_filenames or [])
             else:
                 result = await asyncio.to_thread(rebuild_document_index, operation)
         except Exception as error:
@@ -1168,7 +1255,7 @@ async def upload_document(
     file: Optional[UploadFile] = File(None),
     current_user: User = Depends(require_admin),
 ):
-    """Save selected PDFs and rebuild embeddings once for the complete collection."""
+    """Save selected PDFs and embed only the uploaded files."""
     from pathlib import Path
 
     selected_files = list(files or [])
@@ -1201,7 +1288,9 @@ async def upload_document(
             finish_indexing_operation(error=error)
             raise
         global background_indexing_task
-        background_indexing_task = asyncio.create_task(run_tracked_rebuild("upload"))
+        background_indexing_task = asyncio.create_task(
+            run_tracked_rebuild("upload", saved_filenames)
+        )
         return {
             "accepted": True,
             "message": "Documents saved; embedding job started",

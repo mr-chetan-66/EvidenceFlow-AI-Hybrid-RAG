@@ -66,6 +66,34 @@ class VectorStore:
         print(f"Total chunks {self.collection.count()} Stored")
         return ids
 
+    def replace_documents(self, all_chunks: List[Any], embeddings: np.ndarray):
+        """Upsert chunks and remove stale chunks for only their source files."""
+        if not all_chunks:
+            return []
+
+        document_ids = self.add_documents(all_chunks, embeddings)
+        retained_ids = set(document_ids)
+        sources = {
+            chunk.metadata.get("source")
+            for chunk in all_chunks
+            if chunk.metadata.get("source")
+        }
+
+        for source in sources:
+            stored = self.collection.get(
+                where={"source": source},
+                include=["metadatas"],
+            )
+            stale_ids = [
+                document_id
+                for document_id in stored.get("ids", [])
+                if document_id not in retained_ids
+            ]
+            if stale_ids:
+                self.collection.delete(ids=stale_ids)
+
+        return document_ids
+
     def get_all_documents(self, batch_size: int = 1000):
         """Read the complete persistent text corpus and its citation metadata in pages."""
         documents = []
