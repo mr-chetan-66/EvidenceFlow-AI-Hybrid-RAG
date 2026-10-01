@@ -65,7 +65,7 @@ class AgenticRetrieval:
         self,
         query: str,
         k: int = 10,
-        alpha: float = 0.5
+        alpha: float = 0.65
     ) -> Dict[str, Any]:
         """
         Main agentic retrieval loop
@@ -91,19 +91,19 @@ class AgenticRetrieval:
                     'evidence': cached_result['evidence'],
                     'cache_hit': 'exact',  # Force exact hit for cache results
                     'iterations': 0,
-                    'confidence': cached_result.get('metadata', {}).get('confidence', 0.8),
+                    'confidence': cached_result.get('metadata', {}).get('confidence', 0.0),
                     'evidence_grade': cached_result.get('metadata', {}).get('evidence_grade', {
-                        'overall_quality': 0.8,
-                        'relevance_score': 0.8,
-                        'coverage_score': 0.8,
-                        'diversity_score': 0.8,
-                        'is_sufficient': True
+                        'overall_quality': 0.0,
+                        'relevance_score': 0.0,
+                        'coverage_score': 0.0,
+                        'diversity_score': 0.0,
+                        'is_sufficient': False
                     }),
                     'citation_verification': cached_result.get('metadata', {}).get('citation_verification', {
-                        'is_supported': True,
-                        'confidence': 0.8,
+                        'is_supported': None,
+                        'confidence': 0.0,
                         'unsupported_claims': [],
-                        'verification_details': 'Cached result',
+                        'verification_details': 'Citation verification was not run before caching.',
                         'evidence_count': len(cached_result.get('evidence', [])),
                         'citations': citations
                     }),
@@ -140,6 +140,9 @@ class AgenticRetrieval:
             # Check if evidence is sufficient
             if evidence_grade['is_sufficient']:
                 break
+
+            if not retrieved_docs:
+                break
             
             # If not sufficient and not last iteration, rewrite query
             if iteration < self.max_iterations - 1:
@@ -149,6 +152,30 @@ class AgenticRetrieval:
                     evidence_grade=evidence_grade,
                     retrieved_docs=retrieved_docs
                 )
+
+        if not retrieved_docs:
+            return {
+                'answer': "I could not find relevant evidence in the indexed documents to answer that question.",
+                'evidence': [],
+                'cache_hit': 'miss',
+                'iterations': len(retrieval_history),
+                'retrieval_history': retrieval_history,
+                'evidence_grade': evidence_grade,
+                'citation_verification': {
+                    'is_supported': False,
+                    'confidence': 0.0,
+                    'unsupported_claims': [],
+                    'verification_details': 'No evidence was retrieved.',
+                    'evidence_count': 0,
+                    'citations': [],
+                },
+                'confidence': 0.0,
+                'metadata': {
+                    'original_query': query,
+                    'final_query': current_query,
+                    'retrieval_metadata': retrieval_metadata,
+                },
+            }
         
         # Rerank top results (optional)
         if self.enable_reranking and self.reranker:
@@ -183,8 +210,8 @@ class AgenticRetrieval:
             )
         else:
             citation_verification = {
-                'is_supported': True,
-                'confidence': 0.8,
+                'is_supported': None,
+                'confidence': 0.0,
                 'unsupported_claims': [],
                 'verification_details': 'Citation verification disabled for speed',
                 'evidence_count': len(reranked_docs),
@@ -341,10 +368,15 @@ Rewritten Query:
             Generated answer
         """
         # Prepare evidence context
-        evidence_text = "\n\n".join([
-            f"[{i}] {doc['document']}"
-            for i, doc in enumerate(evidence)
-        ])
+        evidence_blocks = []
+        for index, doc in enumerate(evidence):
+            metadata = doc.get('metadata', {})
+            source = os.path.basename(str(metadata.get('source', 'unknown')))
+            page = metadata.get('page', 'unknown')
+            evidence_blocks.append(
+                f"[{index}] Source: {source}, page: {page}\n{doc['document']}"
+            )
+        evidence_text = "\n\n".join(evidence_blocks)
         
         answer_prompt = f"""
 You are a helpful question-answering assistant that provides accurate, well-cited answers.
@@ -401,11 +433,14 @@ Answer:
         iteration_penalty = max(iteration_penalty, 0.5)
         
         # Calculate weighted average
-        confidence = (
-            0.4 * evidence_confidence +
-            0.4 * citation_confidence +
-            0.2 * iteration_penalty
-        )
+        if citation_verification.get('is_supported') is None:
+            confidence = 0.7 * evidence_confidence + 0.3 * iteration_penalty
+        else:
+            confidence = (
+                0.4 * evidence_confidence +
+                0.4 * citation_confidence +
+                0.2 * iteration_penalty
+            )
         
         return round(confidence, 2)
     

@@ -1,0 +1,78 @@
+EVIDENCEFLOW AI - RAG RELIABILITY HANDOFF
+Date: 2026-10-01
+Workspace: E:\AIML\EvidenceFlow AI
+Branch: main
+Last pushed commit at start of audit: ae42ada (Reset process console and constrain log scrolling)
+Current state: changes listed below are local, uncommitted, and not pushed.
+
+GOAL FROM USER
+The deployed hybrid RAG had 12k+ embedded chunks but gave weak answers such as saying it could not define AWS or AWS S3. User asked for a careful end-to-end audit of retrieval, persistent storage/PostgreSQL, AWS deployment, and related project paths. Do not rush, do not erase/rebuild the production data without a deliberate reason, test the changes, and retain enough context to continue if this agent stops.
+
+IMPORTANT SAFETY
+- No production database, AWS vector index, or source PDF was cleared or overwritten during this audit.
+- Local Chroma data was read only for diagnostics. Current local collection is 3,291 vectors; the user's 12k count refers to the deployed environment.
+- GROQ_API_KEY and COHERE_API_KEY were present in the ignored local .env. Their values were never printed or copied into this file.
+- Two live Groq/Cohere calls were intentionally run for AWS and AWS S3 after the user asked for thorough testing. They used the local read-only Chroma collection and a temporary cache directory; no API credentials, source vectors, or project cache were modified.
+- The only remote request made was an unauthenticated GET to the EC2 API root; it returned HTTP 200 and status ready. No authenticated query/admin route was called.
+- Do not run reinitialize, reindex, or Clear Vector Index against production as part of validation. These changes repair startup retrieval without requiring vector deletion or re-embedding.
+
+ROOT CAUSES VERIFIED
+1. FastAPI startup restored BM25 with `collection.get(limit=100)`, so the hybrid keyword index covered only 100 rows of a potentially 12k+ Chroma collection. The sample first 100 local rows were 99 from AWS services explained.pdf and 1 from aws-overview.pdf. Startup now paginates the entire Chroma collection and restores documents, IDs, and metadata.
+2. BM25 tokenized queries using whitespace only. Common question words such as "what" and "is" polluted rankings for questions like "what is AWS".
+3. Hybrid scoring compared independently normalized BM25 and Chroma distance values as though the scales matched. In the observed local query, unrelated BM25-only results scored 0.86-1.00 while useful dense results scored 0.05-0.17. This caused keyword noise to outrank relevant vector results.
+4. The query cache performed semantic matching and served different questions from cached answers. A local exact cache entry existed for "what is aws". The cache was versioned to 3.0 and now reuses exact questions only; older cache versions are discarded on load.
+5. Empty retrieval still invoked the LLM and citation-disabled responses were marked supported with confidence 0.8. The agent now returns an explicit insufficient-evidence response at confidence 0 without an LLM call; citation verification disabled is represented as unknown, not supported.
+6. The answer prompt omitted source/page labels even though metadata was available. It now includes source file and page with every evidence item.
+7. `run_evaluation.py` previously re-embedded files and wrote into the configured vector store, making evaluation destructive. It now reads the existing vector collection only.
+8. The AWS deploy workflow installed requirement.txt, which lacks psycopg2-binary. requirements_render.txt includes it. AWS workflow and Render manifest now install requirements_render.txt.
+9. Streamlit backup startup had the same 100-row BM25 restore and silently truncated processing to 500 pages. evidenceflow_app.py now uses the shared persistent PDF path and full metadata-aware index.
+10. Evaluation reported citation support as a failure when verification was disabled. It now reports verification coverage separately and support as N/A when no checks were performed.
+
+CHANGES CURRENTLY IN THE WORKTREE
+- .github/workflows/deploy.yml: install requirements_render.txt (includes psycopg2-binary).
+- render.yaml: install requirements_render.txt.
+- backend/app.py: load the entire vector corpus with IDs/metadata in worker threads during startup; build the full BM25 index.
+- evidenceflow_app.py: restore all indexed records and metadata; use shared PDF data path; remove 500-page truncation.
+- frontend/src/App.jsx: send alpha=0.65 for dense-favoring hybrid retrieval.
+- src/vectorstore.py: return Chroma IDs after insertion and add paginated read-only get_all_documents().
+- src/bm25_search.py: normalize punctuation/case, remove common question stopwords, preserve IDs and citation metadata.
+- src/hybrid_retrieval.py: use weighted reciprocal-rank fusion (dense weight defaults to 0.65), retain citations, clamp alpha, reject results below a measured minimum relevance score, and cap results to k.
+- src/agentic_retrieval.py: exact-only cache lookup; no LLM call when evidence is empty; source/page included in prompt; no false citation-supported status; stop rewrite attempts on zero evidence.
+- src/cag_cache.py: exact-query-only cache, no query embedding for cache read/write, cache version 3.0 invalidates stale old answers.
+- src/evaluation.py and run_evaluation.py: evaluation uses the current hybrid weight and does not modify Chroma; citation metrics reflect disabled verification accurately.
+- tests/test_rag_retrieval.py: 11 regression tests for stopwords, weighted hybrid fusion, weak-result rejection, exact cache, cache versioning, Chroma pagination/metadata, no-evidence behavior, source/page prompts, and citation metric semantics.
+
+VERIFICATION ALREADY COMPLETED
+- `python -m unittest tests.test_rag_retrieval -v`: 11 tests pass.
+- Python compilation of backend, all src modules, Streamlit entry points, evaluator, and tests passed using explicit PowerShell file enumeration. Do not use `python -m py_compile src/*.py` in PowerShell; the glob is passed literally and fails.
+- Editor diagnostics: no errors in affected Python files.
+- `git diff --check`: clean.
+- Actual local Chroma collection: 3,291 vectors, with metadata on sampled AWS vectors.
+- Read-only real-corpus retrieval for "what is aws" and "what is AWS S3" using the current 0.65 dense weight returned relevant aws-overview.pdf source/page records in top-five. For AWS S3, page 141 contains the object-storage definition; page 142 and security references add supporting details.
+- A full retrieval-to-prompt replay used the real local Chroma corpus plus a fake LLM. Both AWS questions delivered five evidence chunks and source/page labels to the answer prompt.
+- Two live Groq/Cohere end-to-end smoke queries returned grounded AWS/Amazon S3 answers with source/page citations. The temporary cache was used to avoid changing the project's persisted cache. This validates local provider integration, not EC2/RDS deployment behavior.
+- Warm retrieval measurements after model loading were roughly 31-47 ms for these two local queries; first query was about 217 ms. These are local measurements, not deployed latency guarantees.
+- Both Render and GitHub Actions deployment YAML were parsed; both point to requirements_render.txt.
+- Frontend `npm run build` passed (Vite has an existing Node API deprecation warning).
+
+PENDING / LIMITATIONS
+- No live authenticated query was run against EC2; local model-provider credentials do not establish the deployed service's configuration. The public API root alone is not proof that query generation works in production.
+- No live RDS connection was tested. Static check confirms the deploy requirements now install psycopg2-binary; verify the EC2 service actually completed that install and has a valid DATABASE_URL.
+- Deployed Groq/Cohere availability, account quotas/rate limits, deployed model versions, and production citation behavior remain unverified.
+- Check remaining legacy entry points: root app.py and main.py are older prototypes. README advertises evidenceflow_app.py as the Streamlit backup and run_evaluation.py as evaluation. If app.py/main.py remain supported, make them use get_pdf_directory(), full metadata-aware indexing, and do not append duplicate vectors. Otherwise document them as legacy.
+- Review complete diff before commit, especially the 0.12 relevance cutoff and the dense/keyword weight. Current observed AWS examples pass, but test a broader corpus/domain set before tuning these constants further.
+- Cache v3 clears older cached answers on application startup by design; users may observe a one-time cache miss after deployment.
+
+SAFE NEXT STEPS, IN ORDER
+1. Inspect all changes: `git diff --check`, `git status --short --branch`, `git diff --stat`, and review diffs for backend/app.py, src/* retrieval/cache/vectorstore, evaluation files, deployment manifests, and tests. Do not reset or checkout user files.
+2. Run unit tests: `python -m unittest tests.test_rag_retrieval -v`.
+3. Compile all Python files from PowerShell:
+   `$files = @('backend/app.py','run_evaluation.py','evidenceflow_app.py','main.py','app.py') + @(Get-ChildItem src -Filter *.py -File | ForEach-Object { $_.FullName }) + @(Get-ChildItem tests -Filter *.py -File | ForEach-Object { $_.FullName }); python -m py_compile $files`
+4. Run the frontend check: `Push-Location frontend; npm run build; Pop-Location`.
+5. If code changes are made, rerun the read-only corpus checks using VectorStore.get_all_documents(), HybridRetriever, and a stub LLM. Current local AWS/S3 retrieval and two limited real-model calls already pass. Do not invoke the full run_evaluation.py without cost approval; it makes repeated external answer-model calls even though its vector loading is read-only.
+6. Before production deployment, inspect current EC2 settings without modifying data: `sudo systemctl status evidenceflow`, `sudo journalctl -u evidenceflow -n 200 --no-pager`, `pip show psycopg2-binary`, and a connection-only SQLAlchemy engine check that does not print DATABASE_URL/password. Confirm logs say the entire expected BM25 document count was restored, not just 100.
+7. With authorized credentials, run authenticated read-only `/status` and `/query` checks for "what is AWS" and "what is Amazon S3?". Inspect answer, confidence, citations, page, source, and cache_hit. Confirm old cache was cleared once and subsequent exact query hits are grounded.
+8. Only after user asks/authorizes: commit and push. Monitor the GitHub deploy workflow, then verify EC2 systemd logs and repeat the authenticated read-only query checks. Do not click Clear Vector Index or reinitialize just to test these retrieval-code changes.
+
+CURRENT GIT STATE
+Branch main is based at ae42ada and matches origin/main as of the start of the audit. The files listed under changes are dirty/uncommitted. No audit changes have been pushed. Continue from the existing worktree; do not recreate or revert these changes.

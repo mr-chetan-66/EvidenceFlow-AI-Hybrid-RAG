@@ -64,6 +64,29 @@ class VectorStore:
             )
 
         print(f"Total chunks {self.collection.count()} Stored")
+        return ids
+
+    def get_all_documents(self, batch_size: int = 1000):
+        """Read the complete persistent text corpus and its citation metadata in pages."""
+        documents = []
+        metadatas = []
+        document_ids = []
+        total_count = self.collection.count()
+
+        for offset in range(0, total_count, batch_size):
+            batch = self.collection.get(
+                limit=min(batch_size, total_count - offset),
+                offset=offset,
+                include=["documents", "metadatas"],
+            )
+            batch_documents = batch.get("documents") or []
+            if not batch_documents:
+                break
+            documents.extend(batch_documents)
+            metadatas.extend(batch.get("metadatas") or [{} for _ in batch_documents])
+            document_ids.extend(batch.get("ids") or [None for _ in batch_documents])
+
+        return documents, metadatas, document_ids
         
     def similar_search(self,query_embedding:np.ndarray,n_results=5):
         result=self.collection.query(query_embeddings=[query_embedding.tolist()],n_results=n_results)

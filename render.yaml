@@ -4,7 +4,7 @@ services:
     name: evidenceflow-backend
     runtime: python
     plan: free
-    buildCommand: pip install -r requirement.txt
+    buildCommand: pip install -r requirements_render.txt
     startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION

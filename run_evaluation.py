@@ -2,7 +2,6 @@
 Evaluation Script
 Run comprehensive evaluation of EvidenceFlow AI system
 """
-from src.load_and_chunk import process_all_pdfs, chunk_documnents
 from src.embedding import EmbeddingManager
 from src.vectorstore import VectorStore
 from src.hybrid_retrieval import HybridRetriever
@@ -17,31 +16,18 @@ def main():
     # Initialize system
     print("Initializing system...")
     
-    # Load documents
-    print("Loading documents...")
-    all_documents = process_all_pdfs("./data")
-    print(f"Loaded {len(all_documents)} documents")
-    
-    # Chunk documents
-    print("Chunking documents...")
-    all_chunks = chunk_documnents(all_documents)
-    print(f"Created {len(all_chunks)} chunks")
-    
-    # Initialize components
-    print("Initializing AI components...")
+    # Read the existing collection. Evaluation must never overwrite production vectors.
+    print("Loading the existing vector collection read-only...")
     embedding_manager = EmbeddingManager()
     vectorstore = VectorStore()
-    
-    # Generate embeddings
-    texts = [doc.page_content for doc in all_chunks]
-    embeddings = embedding_manager.genetate_embedding(texts)
-    
-    # Store in vector store
-    vectorstore.add_documents(all_chunks, embeddings)
+    texts, metadatas, document_ids = vectorstore.get_all_documents()
+    if not texts:
+        raise RuntimeError("The vector collection is empty. Upload and index documents before evaluation.")
+    print(f"Loaded {len(texts)} indexed chunks")
     
     # Initialize hybrid retriever
     hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-    hybrid_retriever.index_documents(texts)
+    hybrid_retriever.index_documents(texts, metadatas, document_ids)
     
     # Initialize agentic retrieval
     agentic_retrieval = AgenticRetrieval(hybrid_retriever)

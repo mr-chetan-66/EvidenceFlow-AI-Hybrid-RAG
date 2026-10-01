@@ -183,7 +183,7 @@ function ChatApp() {
       const response = await api.post('/query', {
         query: input,
         k: 10,
-        alpha: 0.5
+        alpha: 0.65
       });
 
       const assistantMessage = {

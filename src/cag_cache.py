@@ -5,7 +5,6 @@ Implements semantic caching for frequently asked questions and verified response
 from typing import List, Dict, Any, Optional
 import json
 import hashlib
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 from src.embedding import EmbeddingManager
@@ -14,6 +13,8 @@ import os
 
 
 class CAGCache:
+    CACHE_VERSION = "3.0"
+
     def __init__(self, cache_dir: str = None, embedding_manager: EmbeddingManager = None):
         """
         Initialize CAG cache
@@ -37,12 +38,15 @@ class CAGCache:
         if self.cache_file.exists():
             try:
                 with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    cache_data = json.load(f)
+                if cache_data.get('metadata', {}).get('version') != self.CACHE_VERSION:
+                    return {'queries': {}, 'metadata': {'version': self.CACHE_VERSION}}
+                return cache_data
             except Exception as e:
                 print(f"Error loading cache: {e}")
-                return {'queries': {}, 'metadata': {'version': '1.0'}}
+                return {'queries': {}, 'metadata': {'version': self.CACHE_VERSION}}
         else:
-            return {'queries': {}, 'metadata': {'version': '1.0'}}
+            return {'queries': {}, 'metadata': {'version': self.CACHE_VERSION}}
     
     def _save_cache(self):
         """Save cache to disk"""
@@ -59,15 +63,12 @@ class CAGCache:
     def get(
         self, 
         query: str, 
-        similarity_threshold: float = 0.85
     ) -> Optional[Dict[str, Any]]:
         """
-        Get cached response for query (exact match or semantic similarity)
+        Get a cached response only for an exact query match.
         
         Args:
             query: Query string
-            similarity_threshold: Threshold for semantic similarity
-            
         Returns:
             Cached response dict or None
         """
@@ -79,56 +80,7 @@ class CAGCache:
             cached['cache_time'] = datetime.now().isoformat()
             return cached
         
-        # Try semantic similarity
-        if self.embedding_manager:
-            cached_entry = self._find_semantic_match(query, similarity_threshold)
-            if cached_entry:
-                cached_entry['cache_hit'] = 'semantic'
-                cached_entry['cache_time'] = datetime.now().isoformat()
-                return cached_entry
-        
         return None
-    
-    def _find_semantic_match(
-        self, 
-        query: str, 
-        threshold: float
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Find semantically similar cached query
-        
-        Args:
-            query: Query string
-            threshold: Similarity threshold
-            
-        Returns:
-            Cached entry or None
-        """
-        if not self.cache_data['queries']:
-            return None
-        
-        # Get query embedding
-        query_embedding = self.embedding_manager.genetate_embedding([query])[0]
-        
-        # Compare with cached queries
-        best_match = None
-        best_similarity = 0.0
-        
-        for query_hash, cached in self.cache_data['queries'].items():
-            if 'query_embedding' not in cached:
-                continue
-                
-            cached_embedding = np.array(cached['query_embedding'])
-            similarity = np.dot(query_embedding, cached_embedding) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(cached_embedding)
-            )
-            
-            if similarity > best_similarity and similarity >= threshold:
-                best_similarity = similarity
-                best_match = cached
-                best_match['similarity'] = similarity
-        
-        return best_match
     
     def set(
         self, 
@@ -147,30 +99,27 @@ class CAGCache:
             metadata: Additional metadata
         """
         query_hash = self._generate_query_hash(query)
-        
-        # Generate query embedding for semantic matching
-        query_embedding = self.embedding_manager.genetate_embedding([query])[0]
+        metadata = metadata or {}
         
         # Prepare cache entry with full evidence metadata
         cache_entry = {
             'query': query,
-            'query_embedding': query_embedding.tolist(),
             'response': response,
             'evidence': evidence or [],
             'metadata': {
                 **(metadata or {}),
                 'evidence_grade': metadata.get('evidence_grade', {
-                    'overall_quality': 0.8,
-                    'relevance_score': 0.8,
-                    'coverage_score': 0.8,
-                    'diversity_score': 0.8,
-                    'is_sufficient': True
+                    'overall_quality': 0.0,
+                    'relevance_score': 0.0,
+                    'coverage_score': 0.0,
+                    'diversity_score': 0.0,
+                    'is_sufficient': False
                 }),
                 'citation_verification': metadata.get('citation_verification', {
-                    'is_supported': True,
-                    'confidence': 0.8,
+                    'is_supported': None,
+                    'confidence': 0.0,
                     'unsupported_claims': [],
-                    'verification_details': 'Cached result',
+                    'verification_details': 'Citation verification was not run before caching.',
                     'evidence_count': len(evidence or []),
                     'citations': []  # Will be extracted on retrieval
                 })
@@ -200,7 +149,7 @@ class CAGCache:
         """
         if query is None:
             # Clear all cache
-            self.cache_data = {'queries': {}, 'metadata': {'version': '1.0'}}
+            self.cache_data = {'queries': {}, 'metadata': {'version': self.CACHE_VERSION}}
         else:
             # Remove specific query
             query_hash = self._generate_query_hash(query)

@@ -48,7 +48,7 @@ class EvaluationSystem:
                 result = self.agentic_retrieval.retrieve_and_answer(
                     question,
                     k=10,
-                    alpha=0.5
+                    alpha=0.65
                 )
                 
                 end_time = time.time()
@@ -144,9 +144,21 @@ class EvaluationSystem:
             'avg_evidence_relevance': np.mean([r['evidence_relevance'] for r in successful_results]),
             'avg_evidence_coverage': np.mean([r['evidence_coverage'] for r in successful_results]),
             'avg_evidence_diversity': np.mean([r['evidence_diversity'] for r in successful_results]),
-            'citation_support_rate': sum(1 for r in successful_results if r['citation_supported']) / len(successful_results),
+            'citation_verification_rate': sum(
+                1 for result in successful_results
+                if result.get('citation_supported') is not None
+            ) / len(successful_results),
             'cache_hit_rate': sum(1 for r in successful_results if r['cache_hit'] != 'miss') / len(successful_results)
         }
+
+        verified_results = [
+            result for result in successful_results
+            if result.get('citation_supported') is not None
+        ]
+        metrics['citation_support_rate'] = (
+            sum(1 for result in verified_results if result['citation_supported']) / len(verified_results)
+            if verified_results else None
+        )
         
         # Add answer similarity if available
         if 'answer_similarity' in successful_results[0]:
@@ -219,7 +231,8 @@ Average Diversity: {metrics['avg_evidence_diversity']:.3f}
 
 CITATION VERIFICATION
 ---------------------
-Support Rate: {metrics['citation_support_rate']:.1%}
+Verification Coverage: {metrics['citation_verification_rate']:.1%}
+Support Rate: {f"{metrics['citation_support_rate']:.1%}" if metrics['citation_support_rate'] is not None else "N/A (verification disabled)"}
 
 CACHE PERFORMANCE
 -----------------

@@ -126,6 +126,7 @@ def initialize_system():
             chunk_documnents = get_module('src.load_and_chunk', 'chunk_documnents')
             HybridRetriever = get_module('src.hybrid_retrieval', 'HybridRetriever')
             AgenticRetrieval = get_module('src.agentic_retrieval', 'AgenticRetrieval')
+            get_pdf_directory = get_module('src.storage_paths', 'get_pdf_directory')
             
             # Check if vector store already has data
             status.write("🔍 Checking existing data...")
@@ -139,14 +140,8 @@ def initialize_system():
                 
                 # Initialize retrievers with existing data
                 hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-                # Try to load existing texts to rebuild BM25 index
-                try:
-                    existing_data = vectorstore.collection.get(limit=100)
-                    if existing_data and 'documents' in existing_data:
-                        texts = existing_data['documents']
-                        hybrid_retriever.index_documents(texts)
-                except:
-                    pass  # Fallback - will work with vector search only
+                texts, metadatas, document_ids = vectorstore.get_all_documents()
+                hybrid_retriever.index_documents(texts, metadatas, document_ids)
                 
                 agentic_retrieval = AgenticRetrieval(hybrid_retriever, max_iterations=2, enable_reranking=True, enable_citation_check=False)
                 cache = get_cache(embedding_manager)
@@ -161,12 +156,7 @@ def initialize_system():
             
             # Step 1: Load documents from PDF folder specifically
             status.write("📄 Loading PDF documents...")
-            all_documents = process_all_pdfs("./data/pdf")
-            
-            # Limit documents for faster processing
-            if len(all_documents) > 500:
-                status.write(f"⚡ Limiting to first 500 pages for faster processing")
-                all_documents = all_documents[:500]
+            all_documents = process_all_pdfs(str(get_pdf_directory()))
             
             status.write(f"✅ Loaded {len(all_documents)} document pages")
             
@@ -188,13 +178,17 @@ def initialize_system():
             
             # Step 5: Store in vector store
             status.write("💾 Building search index...")
-            vectorstore.add_documents(all_chunks, embeddings)
+            document_ids = vectorstore.add_documents(all_chunks, embeddings)
             status.write("✅ Search index ready")
             
             # Step 6: Initialize retrievers
             status.write("🔗 Connecting retrieval systems...")
             hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-            hybrid_retriever.index_documents(texts)
+            hybrid_retriever.index_documents(
+                texts,
+                [chunk.metadata for chunk in all_chunks],
+                document_ids,
+            )
             agentic_retrieval = AgenticRetrieval(hybrid_retrieval, max_iterations=2, enable_reranking=True, enable_citation_check=False)
             cache = get_cache(embedding_manager)
             status.write("✅ Retrieval systems connected")

@@ -30,7 +30,7 @@ jobs:
               "sudo -u ubuntu git fetch origin main",
               "sudo -u ubuntu git reset --hard origin/main",
               "echo Updating Python dependencies...",
-              "sudo -u ubuntu bash -c \"source /home/ubuntu/EvidenceFlow-AI-Hybrid-RAG/.venv/bin/activate && pip install -r /home/ubuntu/EvidenceFlow-AI-Hybrid-RAG/requirement.txt\"",
+              "sudo -u ubuntu bash -c \"source /home/ubuntu/EvidenceFlow-AI-Hybrid-RAG/.venv/bin/activate && pip install -r /home/ubuntu/EvidenceFlow-AI-Hybrid-RAG/requirements_render.txt\"",
               "echo Building frontend...",
               "cd /home/ubuntu/EvidenceFlow-AI-Hybrid-RAG/frontend",
               "sudo -u ubuntu npm install",

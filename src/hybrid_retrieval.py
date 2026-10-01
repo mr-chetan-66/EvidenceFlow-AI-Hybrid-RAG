@@ -10,6 +10,8 @@ from src.vectorstore import VectorStore
 
 
 class HybridRetriever:
+    MIN_RELEVANCE_SCORE = 0.12
+
     def __init__(self, embedding_manager: EmbeddingManager, vectorstore: VectorStore):
         """
         Initialize hybrid retriever
@@ -23,7 +25,12 @@ class HybridRetriever:
         self.bm25 = BM25Search()
         self.is_indexed = False
         
-    def index_documents(self, documents: List[str]):
+    def index_documents(
+        self,
+        documents: List[str],
+        metadatas: List[Dict[str, Any]] = None,
+        document_ids: List[str] = None,
+    ):
         """
         Index documents for both BM25 and vector search
         
@@ -31,14 +38,14 @@ class HybridRetriever:
             documents: List of document strings
         """
         # Index for BM25
-        self.bm25.index_documents(documents)
-        self.is_indexed = True
+        self.bm25.index_documents(documents, metadatas, document_ids)
+        self.is_indexed = self.bm25.is_indexed()
         
     def retrieve(
         self, 
         query: str, 
         k: int = 10, 
-        alpha: float = 0.5
+        alpha: float = 0.65
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Hybrid retrieval combining BM25 and vector search
@@ -57,6 +64,8 @@ class HybridRetriever:
         if not self.is_indexed:
             raise ValueError("Documents not indexed. Call index_documents first.")
             
+        alpha = min(max(alpha, 0.0), 1.0)
+
         # BM25 retrieval
         bm25_results = self.bm25.search(query, k=k)
         
@@ -68,6 +77,7 @@ class HybridRetriever:
         vector_docs = vector_results['documents'][0]
         vector_scores = vector_results['distances'][0] if 'distances' in vector_results else [1.0] * len(vector_docs)
         vector_metadata = vector_results['metadatas'][0] if 'metadatas' in vector_results else [{}] * len(vector_docs)
+        vector_ids = vector_results.get('ids', [[]])[0]
         
         # Normalize and combine scores
         combined_results = self._combine_results(
@@ -75,13 +85,16 @@ class HybridRetriever:
             vector_docs, 
             vector_scores, 
             vector_metadata,
+            vector_ids,
             alpha
         )
+        combined_results = combined_results[:k]
         
         # Prepare metadata
         retrieval_metadata = {
             'bm25_count': len(bm25_results),
             'vector_count': len(vector_docs),
+            'bm25_corpus_count': len(self.bm25.documents),
             'alpha': alpha,
             'query': query
         }
@@ -94,6 +107,7 @@ class HybridRetriever:
         vector_docs: List[str],
         vector_scores: List[float],
         vector_metadata: List[Dict[str, Any]],
+        vector_ids: List[str],
         alpha: float
     ) -> List[Dict[str, Any]]:
         """
@@ -109,55 +123,50 @@ class HybridRetriever:
         Returns:
             Combined and ranked results
         """
-        # Create score dictionary with metadata
-        score_dict = {}
-        
-        # Add BM25 scores (without metadata)
-        max_bm25 = max([r['score'] for r in bm25_results]) if bm25_results else 1.0
-        for result in bm25_results:
-            doc = result['document']
-            normalized_score = result['score'] / max_bm25 if max_bm25 > 0 else 0
-            if doc not in score_dict:
-                score_dict[doc] = {
-                    'bm25_score': normalized_score,
-                    'vector_score': 0.0,
-                    'metadata': {}  # BM25 doesn't have metadata
+        fused = {}
+        rank_constant = 20
+
+        def get_record(document_id, document, metadata):
+            key = document_id or ("text", document)
+            if key not in fused:
+                fused[key] = {
+                    "id": document_id,
+                    "document": document,
+                    "metadata": metadata.copy() if metadata else {},
+                    "bm25_score": 0.0,
+                    "vector_score": 0.0,
+                    "fusion_score": 0.0,
                 }
-            else:
-                score_dict[doc]['bm25_score'] = normalized_score
-        
-        # Add vector scores with metadata (this is where we get source and page info)
-        max_vector = max(vector_scores) if vector_scores else 1.0
-        for doc, score, meta in zip(vector_docs, vector_scores, vector_metadata):
-            # Convert distance to similarity (lower distance = higher similarity)
-            normalized_score = 1.0 - (score / max_vector) if max_vector > 0 else 0
-            if doc not in score_dict:
-                score_dict[doc] = {
-                    'bm25_score': 0.0,
-                    'vector_score': normalized_score,
-                    'metadata': meta.copy() if meta else {}  # Copy metadata
-                }
-            else:
-                score_dict[doc]['vector_score'] = normalized_score
-                # Always prefer vector metadata as it contains source and page info
-                if meta:
-                    score_dict[doc]['metadata'] = meta.copy()
-        
-        # Combine scores
+            elif metadata and not fused[key]["metadata"]:
+                fused[key]["metadata"] = metadata.copy()
+            return fused[key]
+
+        max_bm25 = max((result["score"] for result in bm25_results), default=0.0)
+        for rank, result in enumerate(bm25_results, start=1):
+            record = get_record(result.get("id"), result["document"], result.get("metadata"))
+            record["bm25_score"] = result["score"] / max_bm25 if max_bm25 > 0 else 0.0
+            record["fusion_score"] += (1.0 - alpha) / (rank_constant + rank)
+
+        for rank, (document, distance, metadata, document_id) in enumerate(
+            zip(vector_docs, vector_scores, vector_metadata, vector_ids), start=1
+        ):
+            record = get_record(document_id, document, metadata)
+            record["vector_score"] = max(0.0, 1.0 - float(distance))
+            record["fusion_score"] += alpha / (rank_constant + rank)
+
         combined_results = []
-        for doc, scores in score_dict.items():
-            combined_score = alpha * scores['vector_score'] + (1 - alpha) * scores['bm25_score']
-            combined_results.append({
-                'document': doc,
-                'combined_score': combined_score,
-                'bm25_score': scores['bm25_score'],
-                'vector_score': scores['vector_score'],
-                'metadata': scores['metadata']
-            })
-        
-        # Sort by combined score
-        combined_results.sort(key=lambda x: x['combined_score'], reverse=True)
-        
+        for record in fused.values():
+            record["combined_score"] = (
+                (1.0 - alpha) * record["bm25_score"]
+                + alpha * record["vector_score"]
+            )
+            if record["combined_score"] >= self.MIN_RELEVANCE_SCORE:
+                combined_results.append(record)
+
+        combined_results.sort(
+            key=lambda result: (result["fusion_score"], result["combined_score"]),
+            reverse=True,
+        )
         return combined_results
     
     def is_ready(self) -> bool:

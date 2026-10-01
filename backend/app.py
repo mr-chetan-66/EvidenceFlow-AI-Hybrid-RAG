@@ -355,7 +355,7 @@ def create_access_token(user: User):
 class QueryRequest(BaseModel):
     query: str
     k: int = 10
-    alpha: float = 0.5
+    alpha: float = 0.65
 
 
 class User(BaseModel):
@@ -456,15 +456,15 @@ async def initialize_rag_system():
         if vectorstore.collection.count() > 0:
             print("Loading from existing vector store (skipping reinitialization)...")
             hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
-
-            # Try to rebuild BM25 index from existing data
-            try:
-                existing_data = vectorstore.collection.get(limit=100)
-                if existing_data and 'documents' in existing_data:
-                    texts = existing_data['documents']
-                    hybrid_retriever.index_documents(texts)
-            except:
-                pass
+            texts, metadatas, document_ids = await asyncio.to_thread(
+                vectorstore.get_all_documents
+            )
+            await asyncio.to_thread(
+                hybrid_retriever.index_documents,
+                texts,
+                metadatas,
+                document_ids,
+            )
 
             agentic_retrieval = AgenticRetrieval(
                 hybrid_retriever,
@@ -473,8 +473,8 @@ async def initialize_rag_system():
                 enable_citation_check=False
             )
             cache = CAGCache(embedding_manager=embedding_manager)
-            system_ready = True
-            print("System ready from cache! No reinitialization needed.")
+            system_ready = hybrid_retriever.is_ready()
+            print(f"System restored with {len(texts)} BM25 documents and {vectorstore.collection.count()} vectors.")
         else:
             print("No existing data found. System needs initialization.")
             system_ready = False
@@ -1046,13 +1046,18 @@ def rebuild_document_index(operation="reindex"):
         metadata={"description": "PDF documents RAG vector"},
     )
 
+    document_ids = []
     if texts:
-        vectorstore.add_documents(all_chunks, embeddings)
+        document_ids = vectorstore.add_documents(all_chunks, embeddings)
 
     report_indexing_progress("building_retriever", "Building keyword and vector retrievers", 90)
     hybrid_retriever = HybridRetriever(embedding_manager, vectorstore)
     if texts:
-        hybrid_retriever.index_documents(texts)
+        hybrid_retriever.index_documents(
+            texts,
+            [chunk.metadata for chunk in all_chunks],
+            document_ids,
+        )
     agentic_retrieval = AgenticRetrieval(
         hybrid_retriever,
         max_iterations=2,
